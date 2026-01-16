@@ -210,3 +210,10 @@ __marimo__/
    *.json
    coins_data.json
    subscribers.json
+
+*.pyc
+__pycache__/
+*.json
+.env
+venv/
+.DS_Store
