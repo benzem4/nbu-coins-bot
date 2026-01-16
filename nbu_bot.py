@@ -304,9 +304,32 @@ def main():
     
     schedule_thread = threading.Thread(target=run_schedule, daemon=True)
     schedule_thread.start()
+
+    # Запуск health check сервера
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    print("✅ Health check server started on port 10000")
     
     # Запуск бота
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+# Простий HTTP сервер для Render
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+    
+    def log_message(self, format, *args):
+        pass  # Не логувати HTTP запити
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+    server.serve_forever()
 
 if __name__ == "__main__":
     main()
