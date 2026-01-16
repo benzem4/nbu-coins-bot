@@ -1,9 +1,10 @@
 services:
-     - type: web
-       name: nbu-coin-bot
-       env: python
-       buildCommand: pip install -r requirements.txt
-       startCommand: python nbu_bot.py
-       envVars:
-         - key: TELEGRAM_TOKEN
-           sync: false
+  - type: web
+    name: nbu-coin-bot
+    env: python
+    runtime: python-3.11.0
+    buildCommand: pip install -r requirements.txt
+    startCommand: python nbu_bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
