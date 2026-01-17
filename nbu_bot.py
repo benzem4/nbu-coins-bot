@@ -58,23 +58,66 @@ class NBUCoinMonitor:
             response = requests.get(NBU_URL, headers=headers, timeout=30)
             response.raise_for_status()
             print(f"[{datetime.now()}] Каталог НБУ доступний, статус: {response.status_code}")
+            print(f"[{datetime.now()}] Розмір отриманої сторінки: {len(response.text)} символів")
             
             soup = BeautifulSoup(response.text, 'html.parser')
             coins = []
             
+            # Спочатку шукаємо текст "Знайдено продукції"
+            found_text = soup.find(string=lambda x: x and 'Знайдено продукції' in x)
+            if found_text:
+                print(f"[{datetime.now()}] Знайдено текст на сторінці: {found_text.strip()}")
+            
             # На сторінці каталогу продукти мають клас product-layout
             products = soup.find_all('div', class_='product-layout')
-            print(f"[{datetime.now()}] Знайдено продуктів у каталозі: {len(products)}")
+            print(f"[{datetime.now()}] Знайдено product-layout елементів: {len(products)}")
+            
+            # Якщо не знайшли product-layout, пробуємо інші варіанти
+            if not products:
+                print(f"[{datetime.now()}] product-layout не знайдено, пробую інші варіанти...")
+                
+                # Варіант 2: шукаємо всі посилання на продукти
+                all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
+                print(f"[{datetime.now()}] Знайдено посилань з /p-: {len(all_links)}")
+                
+                # Створюємо унікальний список продуктів з посилань
+                seen_links = set()
+                for link in all_links:
+                    href = link.get('href')
+                    if href and href not in seen_links:
+                        seen_links.add(href)
+                        
+                        # Намагаємось знайти батьківський контейнер
+                        parent = link.find_parent('div', class_=lambda x: x and 'product' in str(x).lower())
+                        if not parent:
+                            parent = link.find_parent('div')
+                        
+                        if parent:
+                            products.append(parent)
+                
+                print(f"[{datetime.now()}] Створено {len(products)} продуктів з посилань")
+            
+            if not products:
+                # Останя спроба - зберігаємо частину HTML для діагностики
+                print(f"[{datetime.now()}] ❌ Не знайдено жодних продуктів!")
+                print(f"[{datetime.now()}] Перші 500 символів HTML:")
+                print(response.text[:500])
+                return []
             
             for idx, product in enumerate(products, 1):
                 try:
-                    # Назва монети
+                    # Назва монети - шукаємо посилання з /p-
                     title = None
                     title_link = product.find('a', href=lambda x: x and '/p-' in x)
-                    if title_link:
-                        title = title_link.get('title') or title_link.text.strip()
                     
-                    if not title:
+                    if title_link:
+                        # Спочатку пробуємо атрибут title
+                        title = title_link.get('title')
+                        # Якщо немає title, беремо текст
+                        if not title or title.strip() == '':
+                            title = title_link.text.strip()
+                    
+                    if not title or title == '':
                         print(f"[{datetime.now()}] Продукт #{idx}: не знайдено назву, пропускаю")
                         continue
                     
@@ -97,9 +140,11 @@ class NBUCoinMonitor:
                     status = "У продажу"
                     
                     # Перевіряємо чи є маркер "скоро у продажу"
-                    soon_marker = product.find('div', class_='sticker-special')
-                    if soon_marker and 'скоро у продажу' in soon_marker.text.lower():
+                    product_text = product.get_text().lower()
+                    if 'скоро у продажу' in product_text:
                         status = "Скоро у продажу"
+                    elif 'очікується' in product_text:
+                        status = "Очікується"
                     
                     # Додаткова інформація (метал, тираж)
                     info_text = product.get_text()
@@ -130,20 +175,22 @@ class NBUCoinMonitor:
                         'found_date': datetime.now().isoformat()
                     }
                     coins.append(coin)
-                    print(f"[{datetime.now()}] Продукт #{idx}: {title} - {price} ({status})")
+                    print(f"[{datetime.now()}] ✓ Продукт #{idx}: {title} - {price} ({status})")
                     
                 except Exception as e:
-                    print(f"[{datetime.now()}] Помилка обробки продукту #{idx}: {e}")
+                    print(f"[{datetime.now()}] ❌ Помилка обробки продукту #{idx}: {e}")
                     continue
             
             print(f"[{datetime.now()}] Успішно оброблено {len(coins)} монет/продуктів")
             return coins
             
         except requests.exceptions.RequestException as e:
-            print(f"[{datetime.now()}] Помилка з'єднання з сайтом НБУ: {e}")
+            print(f"[{datetime.now()}] ❌ Помилка з'єднання з сайтом НБУ: {e}")
             return None
         except Exception as e:
-            print(f"[{datetime.now()}] Загальна помилка отримання даних: {e}")
+            print(f"[{datetime.now()}] ❌ Загальна помилка отримання даних: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def find_new_coins(self, current_coins):
