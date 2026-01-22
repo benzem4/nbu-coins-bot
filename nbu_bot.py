@@ -1,4 +1,8 @@
-import os
+# Металл і тираж
+                        metal = ""
+                        tirazh = ""
+                        if parent:
+                            parent_text = parent.get_text()import os
 import json
 import requests
 from bs4 import BeautifulSoup
@@ -116,18 +120,20 @@ class NBUCoinMonitor:
                                 if price_text:
                                     price = price_text
                         
-                        # Статус та додаткова інформація
-                        status = "У продажу"
-                        metal = ""
-                        tirazh = ""
+                        # Статус - ВАЖЛИВО: визначаємо правильно!
+                        status = "У продажу"  # За замовчуванням
                         
                         if parent:
                             parent_text = parent.get_text()
                             
-                            if 'скоро у продажу' in parent_text.lower():
-                                status = "Скоро у продажу"
-                            elif 'очікується' in parent_text.lower():
+                            # Спочатку перевіряємо найспецифічніші статуси
+                            if 'Очікується' in parent_text or price == "Очікується":
                                 status = "Очікується"
+                            elif 'скоро у продажу' in parent_text.lower():
+                                status = "Скоро у продажу"
+                            # Якщо є ціна в грн - це означає що в продажу
+                            elif 'грн' in price:
+                                status = "У продажу"
                             
                             if 'ЗОЛОТО' in parent_text:
                                 metal = "Золото"
@@ -283,16 +289,21 @@ class NBUCoinMonitor:
             status_emoji = "📦"
             status_text = coin['status']
         
-        message = f"{status_emoji} *{coin['title']}*\n\n"
+        message = f"{status_emoji} *[{coin['title']}]({coin['link']})*\n\n"
         message += f"💰 Ціна: {coin['price']}\n"
         message += f"📊 Статус: {status_text}\n"
         if coin.get('metal'):
             message += f"⚜️ Метал: {coin['metal']}\n"
         if coin.get('tirazh'):
             message += f"📈 Тираж: {coin['tirazh']}\n"
-        if coin['link']:
-            message += f"🔗 [Переглянути на сайті]({coin['link']})\n"
-        message += f"\n⏰ Знайдено: {datetime.fromisoformat(coin['found_date']).strftime('%d.%m.%Y %H:%M')}"
+        
+        # Додаємо правильне посилання залежно від статусу
+        if coin['status'] == "У продажу":
+            message += f"\n🛒 [ЗАМОВИТИ]({coin['link']})"
+        else:
+            message += f"\n🔗 [Переглянути деталі]({coin['link']})"
+        
+        message += f"\n\n⏰ Знайдено: {datetime.fromisoformat(coin['found_date']).strftime('%d.%m.%Y %H:%M')}"
         return message
 
 # Ініціалізація монітора
@@ -408,21 +419,26 @@ async def list_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"🟢 *У ПРОДАЖУ ({len(available)}):*\n"
         for i, coin in enumerate(available, 1):
             metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-            message += f"{i}. {coin['title']}\n   💰 {coin['price']}{metal_info}\n\n"
+            # Додаємо посилання на замовлення
+            message += f"{i}. [{coin['title']}]({coin['link']})\n"
+            message += f"   💰 {coin['price']}{metal_info}\n"
+            message += f"   🛒 [Замовити]({coin['link']})\n\n"
     
     if coming_soon:
         message += f"🔜 *СКОРО У ПРОДАЖУ ({len(coming_soon)}):*\n"
         for i, coin in enumerate(coming_soon, 1):
             metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-            message += f"{i}. {coin['title']}{metal_info}\n\n"
+            message += f"{i}. [{coin['title']}]({coin['link']}){metal_info}\n\n"
     
     if expected:
         message += f"⏳ *ОЧІКУЄТЬСЯ ({len(expected)}):*\n"
         for i, coin in enumerate(expected, 1):
             metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-            message += f"{i}. {coin['title']}{metal_info}\n\n"
+            message += f"{i}. [{coin['title']}]({coin['link']}){metal_info}\n\n"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    message += f"\n🔗 [Переглянути весь каталог](https://coins.bank.gov.ua/catalog.html)"
+    
+    await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /status"""
