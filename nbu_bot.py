@@ -5,8 +5,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import schedule
 import time
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
@@ -269,9 +269,23 @@ class NBUCoinMonitor:
     
     def format_coin_message(self, coin):
         """Форматувати повідомлення про монету"""
-        message = f"🪙 *{coin['title']}*\n\n"
+        # Визначаємо емодзі статусу
+        if coin['status'] == "У продажу":
+            status_emoji = "🟢"
+            status_text = "✅ У ПРОДАЖУ - можна замовити!"
+        elif "очікується" in coin['status'].lower():
+            status_emoji = "⏳"
+            status_text = "⏳ Очікується - ще не надійшла у продаж"
+        elif "скоро" in coin['status'].lower():
+            status_emoji = "🔜"
+            status_text = "🔜 Скоро у продажу - анонсовано"
+        else:
+            status_emoji = "📦"
+            status_text = coin['status']
+        
+        message = f"{status_emoji} *{coin['title']}*\n\n"
         message += f"💰 Ціна: {coin['price']}\n"
-        message += f"📊 Статус: {coin['status']}\n"
+        message += f"📊 Статус: {status_text}\n"
         if coin.get('metal'):
             message += f"⚜️ Метал: {coin['metal']}\n"
         if coin.get('tirazh'):
@@ -284,6 +298,15 @@ class NBUCoinMonitor:
 # Ініціалізація монітора
 monitor = NBUCoinMonitor()
 
+# Клавіатура з кнопками
+def get_keyboard():
+    """Повертає клавіатуру з кнопками"""
+    keyboard = [
+        [KeyboardButton("🔍 Перевірити зараз"), KeyboardButton("📋 Список монет")],
+        [KeyboardButton("📊 Статус бота"), KeyboardButton("🛑 Відписатися")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     print(f"[{datetime.now()}] Отримано команду /start від {update.effective_chat.id}")
@@ -295,16 +318,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[{datetime.now()}] Новий підписник: {chat_id}")
         await update.message.reply_text(
             "✅ Вітаю! Ти підписаний на сповіщення про нові монети НБУ.\n\n"
-            "Я буду перевіряти сайт щодня о 14:00 та сповіщати про нові випуски.\n\n"
-            "Доступні команди:\n"
-            "/start - Підписатися на сповіщення\n"
-            "/stop - Відписатися від сповіщень\n"
-            "/check - Перевірити зараз\n"
-            "/list - Показати всі поточні монети\n"
-            "/status - Статус бота"
+            "Я буду перевіряти сайт двічі на день:\n"
+            "🌅 О 9:00 ранку\n"
+            "🌙 О 22:00 вечора\n\n"
+            "Використовуй кнопки нижче для керування ботом:",
+            reply_markup=get_keyboard()
         )
     else:
-        await update.message.reply_text("Ти вже підписаний на сповіщення! 👍")
+        await update.message.reply_text(
+            "Ти вже підписаний на сповіщення! 👍\n\n"
+            "Використовуй кнопки нижче:",
+            reply_markup=get_keyboard()
+        )
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /stop"""
@@ -372,18 +397,32 @@ async def list_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    await update.message.reply_text(f"📋 Знайдено {len(coins)} продуктів у каталозі:\n")
+    # Розділяємо монети за статусом
+    available = [c for c in coins if c['status'] == "У продажу"]
+    coming_soon = [c for c in coins if "скоро" in c['status'].lower()]
+    expected = [c for c in coins if "очікується" in c['status'].lower()]
     
-    # Показуємо всі монети
-    for i, coin in enumerate(coins, 1):
-        metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-        tirazh_info = f" | Тираж: {coin.get('tirazh', '')}" if coin.get('tirazh') else ""
-        message = f"{i}. {coin['title']}\n   💰 {coin['price']} | 📊 {coin['status']}{metal_info}{tirazh_info}"
-        await update.message.reply_text(message)
-        
-        # Невелика пауза між повідомленнями
-        if i < len(coins):
-            await asyncio.sleep(0.3)
+    message = f"📋 *Каталог НБУ ({len(coins)} позицій)*\n\n"
+    
+    if available:
+        message += f"🟢 *У ПРОДАЖУ ({len(available)}):*\n"
+        for i, coin in enumerate(available, 1):
+            metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
+            message += f"{i}. {coin['title']}\n   💰 {coin['price']}{metal_info}\n\n"
+    
+    if coming_soon:
+        message += f"🔜 *СКОРО У ПРОДАЖУ ({len(coming_soon)}):*\n"
+        for i, coin in enumerate(coming_soon, 1):
+            metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
+            message += f"{i}. {coin['title']}{metal_info}\n\n"
+    
+    if expected:
+        message += f"⏳ *ОЧІКУЄТЬСЯ ({len(expected)}):*\n"
+        for i, coin in enumerate(expected, 1):
+            metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
+            message += f"{i}. {coin['title']}{metal_info}\n\n"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /status"""
@@ -399,9 +438,24 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"👥 Підписників: {len(monitor.subscribers)}\n"
     message += f"🪙 Відстежується монет: {len(monitor.previous_coins)}\n"
     message += f"🕐 Остання перевірка: {last_check}\n"
-    message += f"⏰ Наступна перевірка: щодня о 14:00"
+    message += f"⏰ Наступні перевірки:\n"
+    message += f"   🌅 О 9:00 ранку\n"
+    message += f"   🌙 О 22:00 вечора"
     
     await update.message.reply_text(message, parse_mode='Markdown')
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробка текстових повідомлень (кнопок)"""
+    text = update.message.text
+    
+    if text == "🔍 Перевірити зараз":
+        await check_now(update, context)
+    elif text == "📋 Список монет":
+        await list_coins(update, context)
+    elif text == "📊 Статус бота":
+        await status(update, context)
+    elif text == "🛑 Відписатися":
+        await stop(update, context)
 
 async def scheduled_check(application):
     """Запланована перевірка"""
@@ -454,10 +508,11 @@ def schedule_checker(application):
     def job():
         asyncio.run(run_check())
     
-    # Перевірка щодня о 14:00
-    schedule.every().day.at("14:00").do(job)
+    # Перевірка двічі на день
+    schedule.every().day.at("09:00").do(job)  # Ранкова перевірка
+    schedule.every().day.at("22:00").do(job)  # Вечірня перевірка
     
-    print("✅ Розклад налаштовано: перевірка щодня о 14:00")
+    print("✅ Розклад налаштовано: перевірка о 9:00 та о 22:00")
 
 # Простий HTTP сервер для Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -508,6 +563,10 @@ def main():
     application.add_handler(CommandHandler("check", check_now))
     application.add_handler(CommandHandler("list", list_coins))
     application.add_handler(CommandHandler("status", status))
+    
+    # Обробник текстових повідомлень (кнопок)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     print("✅ Обробники команд зареєстровано")
     
     # Налаштування розкладу
