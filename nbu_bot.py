@@ -80,24 +80,88 @@ class NBUCoinMonitor:
                 all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
                 print(f"[{datetime.now()}] Знайдено посилань з /p-: {len(all_links)}")
                 
-                # Створюємо унікальний список продуктів з посилань
-                seen_links = set()
+                # Беремо унікальні посилання (кожен продукт може мати кілька посилань)
+                seen_hrefs = {}
                 for link in all_links:
                     href = link.get('href')
-                    if href and href not in seen_links:
-                        seen_links.add(href)
+                    if href and href not in seen_hrefs:
+                        # Беремо назву з title або text
+                        title = link.get('title')
+                        if not title or title.strip() == '':
+                            # Якщо немає title, беремо текст посилання
+                            title = link.get_text(strip=True)
                         
-                        # Намагаємось знайти батьківський контейнер
-                        parent = link.find_parent('div', class_=lambda x: x and 'product' in str(x).lower())
-                        if not parent:
-                            parent = link.find_parent('div')
+                        if title and title.strip():
+                            seen_hrefs[href] = {
+                                'title': title.strip(),
+                                'link': href if href.startswith('http') else 'https://coins.bank.gov.ua' + href,
+                                'element': link.find_parent(['div', 'article'])
+                            }
+                
+                print(f"[{datetime.now()}] Знайдено унікальних продуктів: {len(seen_hrefs)}")
+                
+                # Тепер обробляємо кожен знайдений продукт
+                for idx, (href, data) in enumerate(seen_hrefs.items(), 1):
+                    try:
+                        title = data['title']
+                        link = data['link']
+                        parent = data['element']
+                        
+                        # Ціна
+                        price = "Очікується"
+                        if parent:
+                            price_elem = parent.find('p', class_='price')
+                            if price_elem:
+                                price_text = price_elem.text.strip()
+                                if price_text:
+                                    price = price_text
+                        
+                        # Статус та додаткова інформація
+                        status = "У продажу"
+                        metal = ""
+                        tirazh = ""
                         
                         if parent:
-                            products.append(parent)
+                            parent_text = parent.get_text()
+                            
+                            if 'скоро у продажу' in parent_text.lower():
+                                status = "Скоро у продажу"
+                            elif 'очікується' in parent_text.lower():
+                                status = "Очікується"
+                            
+                            if 'ЗОЛОТО' in parent_text:
+                                metal = "Золото"
+                            elif 'СРІБЛО' in parent_text:
+                                metal = "Срібло"
+                            elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in parent_text:
+                                metal = "Інше"
+                            
+                            import re
+                            tirazh_match = re.search(r'ТИРАЖ\s+(\d+)', parent_text)
+                            if tirazh_match:
+                                tirazh = tirazh_match.group(1)
+                        
+                        coin = {
+                            'title': title,
+                            'price': price,
+                            'link': link,
+                            'status': status,
+                            'metal': metal,
+                            'tirazh': tirazh,
+                            'found_date': datetime.now().isoformat()
+                        }
+                        coins.append(coin)
+                        print(f"[{datetime.now()}] ✓ Продукт #{idx}: {title} - {price} ({status})")
+                        
+                    except Exception as e:
+                        print(f"[{datetime.now()}] ❌ Помилка обробки продукту #{idx}: {e}")
+                        continue
                 
-                print(f"[{datetime.now()}] Створено {len(products)} продуктів з посилань")
+                if len(coins) > 0:
+                    print(f"[{datetime.now()}] Успішно оброблено {len(coins)} монет/продуктів")
+                    return coins
             
-            if not products:
+            if not products and len(coins) == 0:
                 # Останя спроба - зберігаємо частину HTML для діагностики
                 print(f"[{datetime.now()}] ❌ Не знайдено жодних продуктів!")
                 print(f"[{datetime.now()}] Перші 500 символів HTML:")
