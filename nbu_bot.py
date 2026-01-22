@@ -222,11 +222,13 @@ monitor = NBUCoinMonitor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
+    print(f"[{datetime.now()}] Отримано команду /start від {update.effective_chat.id}")
     chat_id = update.effective_chat.id
     
     if chat_id not in monitor.subscribers:
         monitor.subscribers.append(chat_id)
         monitor.save_subscribers()
+        print(f"[{datetime.now()}] Новий підписник: {chat_id}")
         await update.message.reply_text(
             "✅ Вітаю! Ти підписаний на сповіщення про нові монети НБУ.\n\n"
             "Я буду перевіряти сайт щодня о 14:00 та сповіщати про нові випуски.\n\n"
@@ -419,15 +421,30 @@ def main():
     print("   (щоб попередні інстанси бота встигли завершитися)")
     time.sleep(10)
     
+    print("🔍 Перевіряю токен бота...")
+    try:
+        import requests
+        response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe")
+        if response.status_code == 200:
+            bot_info = response.json()
+            print(f"✅ Токен валідний! Бот: @{bot_info['result']['username']}")
+        else:
+            print(f"❌ Помилка токену: {response.text}")
+            return
+    except Exception as e:
+        print(f"❌ Не вдалося перевірити токен: {e}")
+    
     # Створення застосунку
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Додавання обробників команд
+    print("📝 Реєструю обробники команд...")
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", check_now))
     application.add_handler(CommandHandler("list", list_coins))
     application.add_handler(CommandHandler("status", status))
+    print("✅ Обробники команд зареєстровано")
     
     # Налаштування розкладу
     schedule_checker(application)
@@ -452,11 +469,19 @@ def main():
     
     # Запуск бота з обробкою помилок
     print("🚀 Запускаю polling...")
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,  # Ігнорувати старі оновлення
-        close_loop=False  # Не закривати event loop
-    )
+    print("⚠️  Якщо бот не реагує на команди, перевір чи правильний username бота в Telegram")
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,  # Ігнорувати старі оновлення
+            close_loop=False,  # Не закривати event loop
+            poll_interval=1.0,  # Інтервал опитування (секунди)
+            timeout=30  # Таймаут запиту
+        )
+    except Exception as e:
+        print(f"❌ Помилка при запуску polling: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     import asyncio
