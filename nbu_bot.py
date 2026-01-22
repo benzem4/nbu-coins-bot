@@ -415,6 +415,10 @@ def main():
         print("Встанови змінну оточення TELEGRAM_TOKEN на Render")
         return
     
+    print("⏳ Чекаю 10 секунд перед запуском...")
+    print("   (щоб попередні інстанси бота встигли завершитися)")
+    time.sleep(10)
+    
     # Створення застосунку
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
@@ -447,9 +451,11 @@ def main():
     schedule_thread.start()
     
     # Запуск бота з обробкою помилок
+    print("🚀 Запускаю polling...")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True  # Ігнорувати старі оновлення
+        drop_pending_updates=True,  # Ігнорувати старі оновлення
+        close_loop=False  # Не закривати event loop
     )
 
 if __name__ == "__main__":
