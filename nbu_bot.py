@@ -2,7 +2,8 @@
                         metal = ""
                         tirazh = ""
                         if parent:
-                            parent_text = parent.get_text()import os
+                            parent_text = parent.get_text()
+import os
 import json
 import requests
 from bs4 import BeautifulSoup
