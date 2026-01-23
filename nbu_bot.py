@@ -114,17 +114,15 @@ class NBUCoinMonitor:
                                 price = price_text
                     
                     # Статус - визначаємо правильно!
-                    status = "У продажу"
+                    # Якщо є конкретна ціна в гривнях - монета У ПРОДАЖУ
+                    # Інакше - ОЧІКУЄТЬСЯ
+                    status = "Очікується"  # За замовчуванням
                     
-                    if parent:
-                        parent_text = parent.get_text()
-                        
-                        # Спочатку перевіряємо найспецифічніші статуси
-                        if 'Очікується' in parent_text or price == "Очікується":
-                            status = "Очікується"
-                        elif 'скоро у продажу' in parent_text.lower():
-                            status = "Скоро у продажу"
-                        elif 'грн' in price:
+                    # Перевіряємо чи є числова ціна
+                    if price and price != "Очікується":
+                        # Якщо в ціні є цифри і слово "грн" - це У ПРОДАЖУ
+                        import re
+                        if re.search(r'\d+', price) and 'грн' in price.lower():
                             status = "У продажу"
                         
                         # Метал і тираж
@@ -183,19 +181,13 @@ class NBUCoinMonitor:
     
     def format_coin_message(self, coin):
         """Форматувати повідомлення про монету"""
-        # Визначаємо емодзі статусу
+        # Тільки два статуси
         if coin['status'] == "У продажу":
             status_emoji = "🟢"
-            status_text = "✅ У ПРОДАЖУ - можна замовити!"
-        elif "очікується" in coin['status'].lower():
-            status_emoji = "⏳"
-            status_text = "⏳ Очікується - ще не надійшла у продаж"
-        elif "скоро" in coin['status'].lower():
-            status_emoji = "🔜"
-            status_text = "🔜 Скоро у продажу - анонсовано"
+            status_text = "У ПРОДАЖУ - можна замовити!"
         else:
-            status_emoji = "📦"
-            status_text = coin['status']
+            status_emoji = "⏳"
+            status_text = "ОЧІКУЄТЬСЯ - ще не в продажу"
         
         message = f"{status_emoji} *[{coin['title']}]({coin['link']})*\n\n"
         message += f"💰 Ціна: {coin['price']}\n"
@@ -205,7 +197,7 @@ class NBUCoinMonitor:
         if coin.get('tirazh'):
             message += f"📈 Тираж: {coin['tirazh']}\n"
         
-        # Додаємо правильне посилання залежно від статусу
+        # Посилання
         if coin['status'] == "У продажу":
             message += f"\n🛒 [ЗАМОВИТИ]({coin['link']})"
         else:
@@ -326,10 +318,9 @@ async def list_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Розділяємо монети за статусом
+    # Тільки дві категорії
     available = [c for c in coins if c['status'] == "У продажу"]
-    coming_soon = [c for c in coins if "скоро" in c['status'].lower()]
-    expected = [c for c in coins if "очікується" in c['status'].lower()]
+    expected = [c for c in coins if c['status'] != "У продажу"]
     
     message = f"📋 *Каталог НБУ ({len(coins)} позицій)*\n\n"
     
@@ -340,12 +331,6 @@ async def list_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"{i}. [{coin['title']}]({coin['link']})\n"
             message += f"   💰 {coin['price']}{metal_info}\n"
             message += f"   🛒 [Замовити]({coin['link']})\n\n"
-    
-    if coming_soon:
-        message += f"🔜 *СКОРО У ПРОДАЖУ ({len(coming_soon)}):*\n"
-        for i, coin in enumerate(coming_soon, 1):
-            metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-            message += f"{i}. [{coin['title']}]({coin['link']}){metal_info}\n\n"
     
     if expected:
         message += f"⏳ *ОЧІКУЄТЬСЯ ({len(expected)}):*\n"
@@ -525,8 +510,12 @@ def main():
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
             close_loop=False,
-            poll_interval=1.0,
-            timeout=30
+            poll_interval=2.0,  # Збільшили з 1.0 до 2.0
+            timeout=60,  # Збільшили з 30 до 60
+            read_timeout=60,  # Додали read timeout
+            write_timeout=60,  # Додали write timeout
+            connect_timeout=60,  # Додали connect timeout
+            pool_timeout=60  # Додали pool timeout
         )
     except Exception as e:
         print(f"❌ Помилка при запуску polling: {e}")
