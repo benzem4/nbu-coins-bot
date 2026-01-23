@@ -9,6 +9,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import re
 
 # Конфігурація
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
@@ -114,29 +115,28 @@ class NBUCoinMonitor:
                                 price = price_text
                     
                     # Статус - визначаємо правильно!
-                    # Якщо є конкретна ціна в гривнях - монета У ПРОДАЖУ
-                    # Інакше - ОЧІКУЄТЬСЯ
                     status = "Очікується"  # За замовчуванням
                     
                     # Перевіряємо чи є числова ціна
                     if price and price != "Очікується":
                         # Якщо в ціні є цифри і слово "грн" - це У ПРОДАЖУ
-                        import re
                         if re.search(r'\d+', price) and 'грн' in price.lower():
                             status = "У продажу"
-                        
-                        # Метал і тираж
-                        metal = ""
-                        tirazh = ""
+                    
+                    # Метал і тираж - ВИПРАВЛЕНО!
+                    metal = ""
+                    tirazh = ""
+                    
+                    if parent:
+                        parent_text = parent.get_text(strip=True).upper()
                         
                         if 'ЗОЛОТО' in parent_text:
                             metal = "Золото"
                         elif 'СРІБЛО' in parent_text:
                             metal = "Срібло"
-                        elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in parent_text:
+                        elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in parent_text or 'НУМІЗМАТИЧНА' in parent_text:
                             metal = "Інше"
                         
-                        import re
                         tirazh_match = re.search(r'ТИРАЖ\s+(\d+)', parent_text)
                         if tirazh_match:
                             tirazh = tirazh_match.group(1)
@@ -155,6 +155,8 @@ class NBUCoinMonitor:
                     
                 except Exception as e:
                     print(f"[{datetime.now()}] ❌ Помилка обробки продукту #{idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
             print(f"[{datetime.now()}] Успішно оброблено {len(coins)} монет/продуктів")
@@ -377,18 +379,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scheduled_check(application):
     """Запланована перевірка"""
-    print(f"[{datetime.now()}] Виконую заплановану перевірку...")
+    print(f"[{datetime.now()}] ⏰ Виконую заплановану перевірку...")
     
     coins = monitor.fetch_coins()
     
     if coins is None:
-        print("Помилка при перевірці сайту")
+        print(f"[{datetime.now()}] ❌ Помилка при перевірці сайту")
+        return
+    
+    if not coins:
+        print(f"[{datetime.now()}] ⚠️ Не знайдено монет на сайті")
         return
     
     new_coins = monitor.find_new_coins(coins)
     
     if new_coins and monitor.subscribers:
-        print(f"Знайдено {len(new_coins)} нових монет. Надсилаю сповіщення...")
+        print(f"[{datetime.now()}] 🎉 Знайдено {len(new_coins)} нових монет. Надсилаю сповіщення...")
         
         for chat_id in monitor.subscribers:
             try:
@@ -406,46 +412,79 @@ async def scheduled_check(application):
                         parse_mode='Markdown',
                         disable_web_page_preview=True
                     )
-                
-                time.sleep(1)
+                    time.sleep(0.5)  # Щоб не заспамити
                 
             except Exception as e:
-                print(f"Помилка надсилання до {chat_id}: {e}")
+                print(f"[{datetime.now()}] ❌ Помилка надсилання до {chat_id}: {e}")
+    else:
+        print(f"[{datetime.now()}] ℹ️ Нових монет не знайдено. Всього: {len(coins)}")
     
     monitor.previous_coins = coins
     monitor.save_coins(coins)
-    print("Перевірка завершена")
+    print(f"[{datetime.now()}] ✅ Перевірка завершена")
+
+# Глобальна змінна для application
+app_instance = None
 
 def schedule_checker(application):
-    """Налаштування розкладу перевірок"""
-    import asyncio
-    
-    async def run_check():
-        await scheduled_check(application)
+    """Налаштування розкладу перевірок - ВИПРАВЛЕНО!"""
+    global app_instance
+    app_instance = application
     
     def job():
-        asyncio.run(run_check())
+        """Синхронна обгортка для асинхронної функції"""
+        try:
+            print(f"[{datetime.now()}] 🔔 Спрацював розклад перевірки")
+            # Створюємо нову event loop для цього потоку
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(scheduled_check(app_instance))
+            loop.close()
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Помилка в розкладі: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Перевірка двічі на день
     schedule.every().day.at("09:00").do(job)
     schedule.every().day.at("22:00").do(job)
     
-    print("✅ Розклад налаштовано: перевірка о 9:00 та о 22:00")
+    print(f"[{datetime.now()}] ✅ Розклад налаштовано: перевірка о 9:00 та о 22:00")
+    print(f"[{datetime.now()}] ⏰ Поточний час: {datetime.now().strftime('%H:%M:%S')}")
 
 # HTTP сервер для Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b'Bot is running')
+        
+        status_html = f"""
+        <html>
+        <head><meta charset="utf-8"><title>NBU Coin Bot Status</title></head>
+        <body>
+        <h1>🤖 NBU Coin Monitor Bot</h1>
+        <p>✅ Bot is running</p>
+        <p>👥 Subscribers: {len(monitor.subscribers)}</p>
+        <p>🪙 Tracked coins: {len(monitor.previous_coins)}</p>
+        <p>⏰ Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(status_html.encode('utf-8'))
     
     def log_message(self, format, *args):
+        # Логуємо тільки важливі запити
         pass
 
 def run_health_server():
-    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+        print(f"[{datetime.now()}] 🏥 Health check server running on port 10000")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[{datetime.now()}] ❌ Помилка health server: {e}")
 
 def main():
     """Головна функція"""
@@ -454,34 +493,36 @@ def main():
         print("Встанови змінну оточення TELEGRAM_TOKEN на Render")
         return
     
-    print("⏳ Чекаю 10 секунд перед запуском...")
+    print(f"[{datetime.now()}] ⏳ Чекаю 10 секунд перед запуском...")
     print("   (щоб попередні інстанси бота встигли завершитися)")
     time.sleep(10)
     
-    print("🔍 Перевіряю токен бота...")
+    print(f"[{datetime.now()}] 🔍 Перевіряю токен бота...")
     try:
-        response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe")
+        response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", timeout=10)
         if response.status_code == 200:
             bot_info = response.json()
-            print(f"✅ Токен валідний! Бот: @{bot_info['result']['username']}")
+            print(f"[{datetime.now()}] ✅ Токен валідний! Бот: @{bot_info['result']['username']}")
         else:
-            print(f"❌ Помилка токену: {response.text}")
+            print(f"[{datetime.now()}] ❌ Помилка токену: {response.text}")
             return
     except Exception as e:
-        print(f"❌ Не вдалося перевірити токен: {e}")
+        print(f"[{datetime.now()}] ❌ Не вдалося перевірити токен: {e}")
+        return
     
     # Створення застосунку
+    print(f"[{datetime.now()}] 🔧 Створюю application...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Додавання обробників
-    print("📝 Реєструю обробники команд...")
+    print(f"[{datetime.now()}] 📝 Реєструю обробники команд...")
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", check_now))
     application.add_handler(CommandHandler("list", list_coins))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Обробники команд зареєстровано")
+    print(f"[{datetime.now()}] ✅ Обробники команд зареєстровано")
     
     # Налаштування розкладу
     schedule_checker(application)
@@ -489,39 +530,44 @@ def main():
     # Запуск health check сервера
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    print("✅ Health check server started on port 10000")
     
-    print("🤖 Бот запущено!")
-    print(f"👥 Підписників: {len(monitor.subscribers)}")
+    print(f"[{datetime.now()}] 🤖 Бот запущено!")
+    print(f"[{datetime.now()}] 👥 Підписників: {len(monitor.subscribers)}")
     
-    # Запуск розкладу
+    # Запуск розкладу в окремому потоці
     def run_schedule():
+        print(f"[{datetime.now()}] ⏰ Розклад перевірок активовано")
         while True:
-            schedule.run_pending()
-            time.sleep(60)
+            try:
+                schedule.run_pending()
+                time.sleep(30)  # Перевіряємо кожні 30 секунд
+            except Exception as e:
+                print(f"[{datetime.now()}] ❌ Помилка в schedule loop: {e}")
+                time.sleep(60)
     
     schedule_thread = threading.Thread(target=run_schedule, daemon=True)
     schedule_thread.start()
     
     # Запуск бота
-    print("🚀 Запускаю polling...")
+    print(f"[{datetime.now()}] 🚀 Запускаю polling...")
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
             close_loop=False,
-            poll_interval=2.0,  # Збільшили з 1.0 до 2.0
-            timeout=60,  # Збільшили з 30 до 60
-            read_timeout=60,  # Додали read timeout
-            write_timeout=60,  # Додали write timeout
-            connect_timeout=60,  # Додали connect timeout
-            pool_timeout=60  # Додали pool timeout
+            poll_interval=2.0,
+            timeout=60,
+            read_timeout=60,
+            write_timeout=60,
+            connect_timeout=60,
+            pool_timeout=60
         )
+    except KeyboardInterrupt:
+        print(f"\n[{datetime.now()}] 🛑 Бот зупинено вручну")
     except Exception as e:
-        print(f"❌ Помилка при запуску polling: {e}")
+        print(f"[{datetime.now()}] ❌ Помилка при запуску polling: {e}")
         import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
-    import asyncio
     main()
