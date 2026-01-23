@@ -23,26 +23,38 @@ class NBUCoinMonitor:
     def load_subscribers(self):
         """Завантажити список підписників"""
         if os.path.exists("subscribers.json"):
-            with open("subscribers.json", "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open("subscribers.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return []
         return []
     
     def save_subscribers(self):
         """Зберегти список підписників"""
-        with open("subscribers.json", "w", encoding="utf-8") as f:
-            json.dump(self.subscribers, f, ensure_ascii=False, indent=2)
+        try:
+            with open("subscribers.json", "w", encoding="utf-8") as f:
+                json.dump(self.subscribers, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Помилка збереження підписників: {e}")
     
     def load_previous_coins(self):
         """Завантажити попередній список монет"""
         if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return []
         return []
     
     def save_coins(self, coins):
         """Зберегти поточний список монет"""
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(coins, f, ensure_ascii=False, indent=2)
+        try:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(coins, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Помилка збереження монет: {e}")
     
     def fetch_coins(self):
         """Отримати список монет з сайту НБУ"""
@@ -63,173 +75,73 @@ class NBUCoinMonitor:
             soup = BeautifulSoup(response.text, 'html.parser')
             coins = []
             
-            # Спочатку шукаємо текст "Знайдено продукції"
-            found_text = soup.find(string=lambda x: x and 'Знайдено продукції' in x)
-            if found_text:
-                print(f"[{datetime.now()}] Знайдено текст на сторінці: {found_text.strip()}")
+            # Шукаємо всі посилання на продукти
+            all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
+            print(f"[{datetime.now()}] Знайдено посилань з /p-: {len(all_links)}")
             
-            # На сторінці каталогу продукти мають клас product-layout
-            products = soup.find_all('div', class_='product-layout')
-            print(f"[{datetime.now()}] Знайдено product-layout елементів: {len(products)}")
-            
-            # Якщо не знайшли product-layout, пробуємо інші варіанти
-            if not products:
-                print(f"[{datetime.now()}] product-layout не знайдено, пробую інші варіанти...")
-                
-                # Варіант 2: шукаємо всі посилання на продукти
-                all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
-                print(f"[{datetime.now()}] Знайдено посилань з /p-: {len(all_links)}")
-                
-                # Беремо унікальні посилання (кожен продукт може мати кілька посилань)
-                seen_hrefs = {}
-                for link in all_links:
-                    href = link.get('href')
-                    if href and href not in seen_hrefs:
-                        # Беремо назву з title або text
-                        title = link.get('title')
-                        if not title or title.strip() == '':
-                            # Якщо немає title, беремо текст посилання
-                            title = link.get_text(strip=True)
-                        
-                        if title and title.strip():
-                            seen_hrefs[href] = {
-                                'title': title.strip(),
-                                'link': href if href.startswith('http') else 'https://coins.bank.gov.ua' + href,
-                                'element': link.find_parent(['div', 'article'])
-                            }
-                
-                print(f"[{datetime.now()}] Знайдено унікальних продуктів: {len(seen_hrefs)}")
-                
-                # Тепер обробляємо кожен знайдений продукт
-                for idx, (href, data) in enumerate(seen_hrefs.items(), 1):
-                    try:
-                        title = data['title']
-                        link = data['link']
-                        parent = data['element']
-                        
-                        # Ціна
-                        price = "Очікується"
-                        if parent:
-                            price_elem = parent.find('p', class_='price')
-                            if price_elem:
-                                price_text = price_elem.text.strip()
-                                if price_text:
-                                    price = price_text
-                        
-                        # Статус - ВАЖЛИВО: визначаємо правильно!
-                        status = "У продажу"  # За замовчуванням
-                        
-                        if parent:
-                            parent_text = parent.get_text()
-                            
-                            # Спочатку перевіряємо найспецифічніші статуси
-                            if 'Очікується' in parent_text or price == "Очікується":
-                                status = "Очікується"
-                            elif 'скоро у продажу' in parent_text.lower():
-                                status = "Скоро у продажу"
-                            # Якщо є ціна в грн - це означає що в продажу
-                            elif 'грн' in price:
-                                status = "У продажу"
-                            
-                            if 'ЗОЛОТО' in parent_text:
-                                metal = "Золото"
-                            elif 'СРІБЛО' in parent_text:
-                                metal = "Срібло"
-                            elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in parent_text:
-                                metal = "Інше"
-                            
-                            import re
-                            tirazh_match = re.search(r'ТИРАЖ\s+(\d+)', parent_text)
-                            if tirazh_match:
-                                tirazh = tirazh_match.group(1)
-                        
-                        coin = {
-                            'title': title,
-                            'price': price,
-                            'link': link,
-                            'status': status,
-                            'metal': metal,
-                            'tirazh': tirazh,
-                            'found_date': datetime.now().isoformat()
+            # Беремо унікальні посилання
+            seen_hrefs = {}
+            for link in all_links:
+                href = link.get('href')
+                if href and href not in seen_hrefs:
+                    # Беремо назву
+                    title = link.get('title') or link.get_text(strip=True)
+                    
+                    if title and title.strip():
+                        parent = link.find_parent(['div', 'article'])
+                        seen_hrefs[href] = {
+                            'title': title.strip(),
+                            'link': href if href.startswith('http') else 'https://coins.bank.gov.ua' + href,
+                            'element': parent
                         }
-                        coins.append(coin)
-                        print(f"[{datetime.now()}] ✓ Продукт #{idx}: {title} - {price} ({status})")
-                        
-                    except Exception as e:
-                        print(f"[{datetime.now()}] ❌ Помилка обробки продукту #{idx}: {e}")
-                        continue
-                
-                if len(coins) > 0:
-                    print(f"[{datetime.now()}] Успішно оброблено {len(coins)} монет/продуктів")
-                    return coins
             
-            if not products and len(coins) == 0:
-                # Останя спроба - зберігаємо частину HTML для діагностики
-                print(f"[{datetime.now()}] ❌ Не знайдено жодних продуктів!")
-                print(f"[{datetime.now()}] Перші 500 символів HTML:")
-                print(response.text[:500])
-                return []
+            print(f"[{datetime.now()}] Знайдено унікальних продуктів: {len(seen_hrefs)}")
             
-            for idx, product in enumerate(products, 1):
+            # Обробляємо кожен продукт
+            for idx, (href, data) in enumerate(seen_hrefs.items(), 1):
                 try:
-                    # Назва монети - шукаємо посилання з /p-
-                    title = None
-                    title_link = product.find('a', href=lambda x: x and '/p-' in x)
-                    
-                    if title_link:
-                        # Спочатку пробуємо атрибут title
-                        title = title_link.get('title')
-                        # Якщо немає title, беремо текст
-                        if not title or title.strip() == '':
-                            title = title_link.text.strip()
-                    
-                    if not title or title == '':
-                        print(f"[{datetime.now()}] Продукт #{idx}: не знайдено назву, пропускаю")
-                        continue
+                    title = data['title']
+                    link = data['link']
+                    parent = data['element']
                     
                     # Ціна
                     price = "Очікується"
-                    price_elem = product.find('p', class_='price')
-                    if price_elem:
-                        price_text = price_elem.text.strip()
-                        if price_text and price_text != "":
-                            price = price_text
+                    if parent:
+                        price_elem = parent.find('p', class_='price')
+                        if price_elem:
+                            price_text = price_elem.text.strip()
+                            if price_text:
+                                price = price_text
                     
-                    # Посилання
-                    link = ""
-                    if title_link and title_link.get('href'):
-                        link = title_link.get('href')
-                        if not link.startswith('http'):
-                            link = 'https://coins.bank.gov.ua' + link
-                    
-                    # Статус (в наявності / скоро у продажу / очікується)
+                    # Статус - визначаємо правильно!
                     status = "У продажу"
                     
-                    # Перевіряємо чи є маркер "скоро у продажу"
-                    product_text = product.get_text().lower()
-                    if 'скоро у продажу' in product_text:
-                        status = "Скоро у продажу"
-                    elif 'очікується' in product_text:
-                        status = "Очікується"
-                    
-                    # Додаткова інформація (метал, тираж)
-                    info_text = product.get_text()
-                    
-                    # Визначаємо метал
-                    metal = ""
-                    if 'ЗОЛОТО' in info_text:
-                        metal = "Золото"
-                    elif 'СРІБЛО' in info_text:
-                        metal = "Срібло"
-                    elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in info_text:
-                        metal = "Інше"
-                    
-                    # Тираж
-                    tirazh = ""
-                    import re
-                    tirazh_match = re.search(r'ТИРАЖ\s+(\d+)', info_text)
-                    if tirazh_match:
-                        tirazh = tirazh_match.group(1)
+                    if parent:
+                        parent_text = parent.get_text()
+                        
+                        # Спочатку перевіряємо найспецифічніші статуси
+                        if 'Очікується' in parent_text or price == "Очікується":
+                            status = "Очікується"
+                        elif 'скоро у продажу' in parent_text.lower():
+                            status = "Скоро у продажу"
+                        elif 'грн' in price:
+                            status = "У продажу"
+                        
+                        # Метал і тираж
+                        metal = ""
+                        tirazh = ""
+                        
+                        if 'ЗОЛОТО' in parent_text:
+                            metal = "Золото"
+                        elif 'СРІБЛО' in parent_text:
+                            metal = "Срібло"
+                        elif 'ІНША НУМІЗМАТИЧНА ПРОДУКЦІЯ' in parent_text:
+                            metal = "Інше"
+                        
+                        import re
+                        tirazh_match = re.search(r'ТИРАЖ\s+(\d+)', parent_text)
+                        if tirazh_match:
+                            tirazh = tirazh_match.group(1)
                     
                     coin = {
                         'title': title,
@@ -351,39 +263,49 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /check - перевірити зараз"""
-    await update.message.reply_text("🔍 Перевіряю сайт НБУ...")
+    await update.message.reply_text(
+        "🔍 Перевіряю каталог НБУ...\n"
+        "🔗 [Переглянути каталог вручну](https://coins.bank.gov.ua/catalog.html)",
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
     
     coins = monitor.fetch_coins()
     
     if coins is None:
         await update.message.reply_text(
-            "❌ Помилка при перевірці сайту. Можливо, сайт НБУ тимчасово недоступний.\n"
-            "Спробуй пізніше або перевір сайт вручну: https://coins.bank.gov.ua/"
+            "❌ Помилка при перевірці каталогу. Можливо, сайт НБУ тимчасово недоступний.\n"
+            "Спробуй пізніше або перевір каталог вручну:\n"
+            "🔗 https://coins.bank.gov.ua/catalog.html"
         )
         return
     
     if not coins:
         await update.message.reply_text(
-            "📭 Не вдалося знайти монети в каталозі.\n"
+            "📭 Не вдалося знайти продукцію в каталозі.\n"
             "Це може бути через зміну структури сайту або тимчасові проблеми.\n"
-            "Перевір каталог вручну: https://coins.bank.gov.ua/catalog.html"
+            "Перевір каталог вручну:\n"
+            "🔗 https://coins.bank.gov.ua/catalog.html"
         )
         return
     
     new_coins = monitor.find_new_coins(coins)
     
     if new_coins:
-        await update.message.reply_text(f"🎉 Знайдено {len(new_coins)} нову(-их) монету(-и)!")
-        for coin in new_coins[:5]:  # Обмежуємо 5 монетами
+        await update.message.reply_text(f"🎉 Знайдено {len(new_coins)} нову(-их) позицію(-ій)!")
+        for coin in new_coins[:5]:
             message = monitor.format_coin_message(coin)
             await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
         
         if len(new_coins) > 5:
-            await update.message.reply_text(f"... та ще {len(new_coins) - 5} монет(-и)")
+            await update.message.reply_text(f"... та ще {len(new_coins) - 5} позицій")
     else:
         await update.message.reply_text(
-            f"📭 Нових монет не знайдено.\n"
-            f"Всього на сайті: {len(coins)} монет(-и)"
+            f"📭 Нових позицій не знайдено.\n"
+            f"Всього в каталозі: {len(coins)} позицій\n\n"
+            f"🔗 [Переглянути каталог](https://coins.bank.gov.ua/catalog.html)",
+            parse_mode='Markdown',
+            disable_web_page_preview=True
         )
     
     monitor.previous_coins = coins
@@ -415,7 +337,6 @@ async def list_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"🟢 *У ПРОДАЖУ ({len(available)}):*\n"
         for i, coin in enumerate(available, 1):
             metal_info = f" | {coin.get('metal', '')}" if coin.get('metal') else ""
-            # Додаємо посилання на замовлення
             message += f"{i}. [{coin['title']}]({coin['link']})\n"
             message += f"   💰 {coin['price']}{metal_info}\n"
             message += f"   🛒 [Замовити]({coin['link']})\n\n"
@@ -521,12 +442,12 @@ def schedule_checker(application):
         asyncio.run(run_check())
     
     # Перевірка двічі на день
-    schedule.every().day.at("09:00").do(job)  # Ранкова перевірка
-    schedule.every().day.at("22:00").do(job)  # Вечірня перевірка
+    schedule.every().day.at("09:00").do(job)
+    schedule.every().day.at("22:00").do(job)
     
     print("✅ Розклад налаштовано: перевірка о 9:00 та о 22:00")
 
-# Простий HTTP сервер для Render
+# HTTP сервер для Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -554,7 +475,6 @@ def main():
     
     print("🔍 Перевіряю токен бота...")
     try:
-        import requests
         response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe")
         if response.status_code == 200:
             bot_info = response.json()
@@ -568,17 +488,14 @@ def main():
     # Створення застосунку
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Додавання обробників команд
+    # Додавання обробників
     print("📝 Реєструю обробники команд...")
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", check_now))
     application.add_handler(CommandHandler("list", list_coins))
     application.add_handler(CommandHandler("status", status))
-    
-    # Обробник текстових повідомлень (кнопок)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
     print("✅ Обробники команд зареєстровано")
     
     # Налаштування розкладу
@@ -589,11 +506,10 @@ def main():
     health_thread.start()
     print("✅ Health check server started on port 10000")
     
-    # Запуск бота
     print("🤖 Бот запущено!")
     print(f"👥 Підписників: {len(monitor.subscribers)}")
     
-    # Запуск в окремому потоці для виконання розкладу
+    # Запуск розкладу
     def run_schedule():
         while True:
             schedule.run_pending()
@@ -602,16 +518,15 @@ def main():
     schedule_thread = threading.Thread(target=run_schedule, daemon=True)
     schedule_thread.start()
     
-    # Запуск бота з обробкою помилок
+    # Запуск бота
     print("🚀 Запускаю polling...")
-    print("⚠️  Якщо бот не реагує на команди, перевір чи правильний username бота в Telegram")
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,  # Ігнорувати старі оновлення
-            close_loop=False,  # Не закривати event loop
-            poll_interval=1.0,  # Інтервал опитування (секунди)
-            timeout=30  # Таймаут запиту
+            drop_pending_updates=True,
+            close_loop=False,
+            poll_interval=1.0,
+            timeout=30
         )
     except Exception as e:
         print(f"❌ Помилка при запуску polling: {e}")
