@@ -83,22 +83,19 @@ class NBUCoinMonitor:
         parent_upper = parent_text.upper()
         price_upper = price_text.upper()
         
-        # У продажу - якщо є конкретна ціна в гривнях
-        if re.search(r'\d+\s*ГРН', price_upper):
-            if 'ОЧІКУЄТЬСЯ' not in parent_upper and 'СКОРО' not in parent_upper:
-                return "У продажу", None
+        # Перевіряємо чи є фрази про очікування
+        expecting_keywords = ['ОЧІКУЄТЬСЯ', 'СКОРО У ПРОДАЖУ', 'СКОРО', 'НЕЗАБАРОМ', 'АНОНС']
+        is_expecting = any(kw in parent_upper for kw in expecting_keywords)
+        
+        # У продажу - якщо є конкретна числова ціна в гривнях БЕЗ слів про очікування
+        has_price = bool(re.search(r'\d+[\s\d]*\s*ГРН', price_upper))
+        
+        if has_price and not is_expecting:
+            return "У продажу", None
         
         # Очікується - шукаємо дату
-        expected_date = None
-        if any(kw in parent_upper for kw in ['ОЧІКУЄТЬСЯ', 'СКОРО', 'НЕЗАБАРОМ', 'АНОНС']):
-            expected_date = self.extract_date_from_text(parent_text)
-            return "Очікується", expected_date
-        
-        if 'ОЧІКУЄТЬСЯ' in price_upper or not re.search(r'\d+', price_text):
-            expected_date = self.extract_date_from_text(parent_text)
-            return "Очікується", expected_date
-        
-        return "Очікується", None
+        expected_date = self.extract_date_from_text(parent_text)
+        return "Очікується", expected_date
     
     def fetch_coins(self):
         try:
