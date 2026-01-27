@@ -458,8 +458,8 @@ def main():
         logger.error("❌ Потрібен TELEGRAM_TOKEN!")
         return
     
-    logger.info("⏳ Чекаю 10 сек...")
-    time.sleep(10)
+    logger.info("⏳ Чекаю 20 сек для завершення старих інстансів...")
+    time.sleep(20)
     
     logger.info("🔍 Перевіряю токен...")
     try:
