@@ -14,7 +14,7 @@ import logging
 
 # Конфігурація
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")  # Твій Telegram chat ID для сповіщень
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 NBU_URL = "https://coins.bank.gov.ua/catalog.html"
 DATA_FILE = "coins_data.json"
 LOG_FILE = "bot_log.txt"
@@ -79,24 +79,6 @@ class NBUCoinMonitor:
                 return match.group(1)
         return None
     
-    def determine_status(self, parent_text, price_text):
-        parent_upper = parent_text.upper()
-        price_upper = price_text.upper()
-        
-        # Перевіряємо чи є фрази про очікування
-        expecting_keywords = ['ОЧІКУЄТЬСЯ', 'СКОРО У ПРОДАЖУ', 'СКОРО', 'НЕЗАБАРОМ', 'АНОНС']
-        is_expecting = any(kw in parent_upper for kw in expecting_keywords)
-        
-        # У продажу - якщо є конкретна числова ціна в гривнях БЕЗ слів про очікування
-        has_price = bool(re.search(r'\d+[\s\d]*\s*ГРН', price_upper))
-        
-        if has_price and not is_expecting:
-            return "У продажу", None
-        
-        # Очікується - шукаємо дату
-        expected_date = self.extract_date_from_text(parent_text)
-        return "Очікується", expected_date
-    
     def fetch_coins(self):
         try:
             logger.info("Починаю перевірку каталогу НБУ...")
@@ -110,58 +92,56 @@ class NBUCoinMonitor:
             response.raise_for_status()
             logger.info(f"Каталог НБУ доступний, статус: {response.status_code}")
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            html = response.text
+            soup = BeautifulSoup(html, 'html.parser')
             coins = []
             
+            # Альтернативний метод - парсимо через RAW HTML
             all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
             logger.info(f"Знайдено посилань: {len(all_links)}")
             
-            seen_hrefs = {}
-            for link in all_links:
-                href = link.get('href')
-                if href and href not in seen_hrefs:
-                    title = link.get('title') or link.get_text(strip=True)
-                    if title and title.strip():
-                        parent = link.find_parent(['div', 'article', 'section'])
-                        seen_hrefs[href] = {
-                            'title': title.strip(),
-                            'link': href if href.startswith('http') else 'https://coins.bank.gov.ua' + href,
-                            'element': parent
-                        }
-            
-            logger.info(f"Унікальних продуктів: {len(seen_hrefs)}")
-            
-            for idx, (href, data) in enumerate(seen_hrefs.items(), 1):
+            # Обробляємо через RAW HTML регулярками
+            for match in re.finditer(r'<a[^>]+href="(/[^"]*?/p-\d+\.html)"[^>]*>([^<]+)</a>(.*?)(?=<a[^>]+href="/[^"]*?/p-\d+\.html"|$)', html, re.DOTALL):
                 try:
-                    title = data['title']
-                    link = data['link']
-                    parent = data['element']
+                    link_path = match.group(1)
+                    title = match.group(2).strip()
+                    context = match.group(3)[:800]  # Беремо 800 символів після посилання
                     
+                    link = f'https://coins.bank.gov.ua{link_path}'
+                    
+                    # Шукаємо ціну
                     price = "Очікується"
-                    if parent:
-                        price_elem = parent.find('p', class_='price')
-                        if price_elem:
-                            price_text = price_elem.text.strip()
-                            if price_text:
-                                price = price_text
+                    price_match = re.search(r'(\d[\d\s]+)\s*грн', context)
+                    if price_match:
+                        price_num = price_match.group(1).replace(' ', '')
+                        price = f"{price_num} грн"
                     
-                    parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
-                    status, expected_date = self.determine_status(parent_text, price)
+                    # Визначаємо статус
+                    context_upper = context.upper()
+                    has_expecting = any(w in context_upper for w in ['ОЧІКУЄТЬСЯ', 'СКОРО'])
+                    has_price = bool(re.search(r'\d+', price))
                     
+                    if has_price and not has_expecting:
+                        status = "У продажу"
+                        expected_date = None
+                    else:
+                        status = "Очікується"
+                        expected_date = self.extract_date_from_text(context)
+                    
+                    # Метал
                     metal = ""
+                    if 'ЗОЛОТО' in context_upper:
+                        metal = "Золото"
+                    elif 'СРІБЛО' in context_upper:
+                        metal = "Срібло"
+                    elif 'НУМІЗМАТИЧНА' in context_upper:
+                        metal = "Інше"
+                    
+                    # Тираж
                     tirazh = ""
-                    if parent_text:
-                        parent_upper = parent_text.upper()
-                        if 'ЗОЛОТО' in parent_upper:
-                            metal = "Золото"
-                        elif 'СРІБЛО' in parent_upper:
-                            metal = "Срібло"
-                        elif 'НУМІЗМАТИЧНА' in parent_upper:
-                            metal = "Інше"
-                        
-                        tirazh_match = re.search(r'ТИРАЖ\s*:?\s*(\d+[\s\d]*)', parent_upper)
-                        if tirazh_match:
-                            tirazh = tirazh_match.group(1).replace(' ', '')
+                    tirazh_match = re.search(r'ТИРАЖ\s*(\d+)', context_upper)
+                    if tirazh_match:
+                        tirazh = tirazh_match.group(1)
                     
                     coin = {
                         'title': title,
@@ -173,11 +153,14 @@ class NBUCoinMonitor:
                         'tirazh': tirazh,
                         'found_date': datetime.now().isoformat()
                     }
-                    coins.append(coin)
-                    date_info = f" ({expected_date})" if expected_date else ""
-                    logger.info(f"✓ #{idx}: {title} - {status}{date_info}")
+                    
+                    # Перевіряємо дублікати
+                    if not any(c['link'] == link for c in coins):
+                        coins.append(coin)
+                        logger.info(f"✓ #{len(coins)}: {title} - {price} ({status})")
+                
                 except Exception as e:
-                    logger.error(f"❌ Помилка #{idx}: {e}")
+                    logger.error(f"Помилка обробки: {e}")
             
             available = sum(1 for c in coins if c['status'] == "У продажу")
             expected = sum(1 for c in coins if c['status'] == "Очікується")
@@ -334,6 +317,37 @@ async def test_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка: {str(e)[:200]}")
 
+async def test_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📧 Тестове сповіщення...")
+    
+    test_coin = {
+        'title': 'ТЕСТОВА МОНЕТА',
+        'price': '1000 грн',
+        'link': 'https://coins.bank.gov.ua/catalog.html',
+        'status': 'У продажу',
+        'expected_date': None,
+        'metal': 'Золото',
+        'tirazh': '5000',
+        'found_date': datetime.now().isoformat()
+    }
+    
+    message = monitor.format_coin_message(test_coin)
+    success = 0
+    
+    for chat_id in monitor.subscribers:
+        try:
+            await context.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"🎉 *ТЕСТ*\n\n{message}",
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Помилка тесту: {e}")
+    
+    await update.message.reply_text(f"✅ Надіслано {success}/{len(monitor.subscribers)}!")
+
 async def get_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("🔒 Тільки для адміна.")
@@ -369,40 +383,71 @@ async def notify_admin(app, msg):
         try:
             await app.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"🔔 {msg}", parse_mode='Markdown')
         except Exception as e:
-            logger.error(f"Не вдалося надіслати адміну: {e}")
+            logger.error(f"Помилка адмін: {e}")
 
 async def scheduled_check(app):
     logger.info("⏰ Запланована перевірка...")
+    logger.info(f"📋 Підписників: {len(monitor.subscribers)}")
+    
     try:
         coins = monitor.fetch_coins()
+        
         if coins is None:
-            await notify_admin(app, "❌ Помилка перевірки сайту")
+            await notify_admin(app, "❌ Помилка сайту")
             return
+        
         if not coins:
             await notify_admin(app, "⚠️ Монет не знайдено")
             return
         
+        logger.info(f"📦 Отримано {len(coins)} монет")
+        logger.info(f"💾 Попередньо {len(monitor.previous_coins)} монет")
+        
         new_coins = monitor.find_new_coins(coins)
+        logger.info(f"🆕 Нових: {len(new_coins)}")
+        
+        if new_coins:
+            logger.info(f"📢 Нові: {[c['title'] for c in new_coins]}")
+        
         if new_coins and monitor.subscribers:
-            logger.info(f"🎉 {len(new_coins)} нових монет")
+            logger.info(f"🎉 Надсилаю {len(new_coins)} монет до {len(monitor.subscribers)}...")
+            
+            success = 0
             for chat_id in monitor.subscribers:
                 try:
-                    await app.bot.send_message(chat_id=chat_id, text=f"🎉 *НОВІ МОНЕТИ!*\n\n{len(new_coins)} нових", parse_mode='Markdown')
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🎉 *НОВІ МОНЕТИ НБУ!*\n\n{len(new_coins)} нових:",
+                        parse_mode='Markdown'
+                    )
+                    
                     for coin in new_coins:
-                        await app.bot.send_message(chat_id=chat_id, text=monitor.format_coin_message(coin), parse_mode='Markdown', disable_web_page_preview=True)
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=monitor.format_coin_message(coin),
+                            parse_mode='Markdown',
+                            disable_web_page_preview=True
+                        )
                         time.sleep(0.5)
+                    
+                    success += 1
+                    logger.info(f"✅ Надіслано {chat_id}")
                 except Exception as e:
-                    logger.error(f"Помилка {chat_id}: {e}")
-            await notify_admin(app, f"✅ Надіслано про {len(new_coins)} монет")
+                    logger.error(f"❌ Помилка {chat_id}: {e}")
+            
+            logger.info(f"📊 Успішно: {success}/{len(monitor.subscribers)}")
+            await notify_admin(app, f"✅ Надіслано {len(new_coins)} монет до {success} користувачів")
         else:
-            logger.info(f"ℹ️ Нових немає. Всього: {len(coins)}")
+            logger.info(f"ℹ️ Нових немає")
         
         monitor.previous_coins = coins
         monitor.save_coins(coins)
-        logger.info("✅ Перевірка завершена")
+        logger.info("✅ Завершено")
     except Exception as e:
         logger.error(f"❌ Помилка: {e}")
-        await notify_admin(app, f"❌ Критична помилка: {str(e)[:100]}")
+        import traceback
+        traceback.print_exc()
+        await notify_admin(app, f"❌ Помилка: {str(e)[:100]}")
 
 app_instance = None
 
@@ -421,24 +466,14 @@ def schedule_checker(app):
         except Exception as e:
             logger.error(f"Помилка розкладу: {e}")
     
-    # ВАЖЛИВО: Render працює в UTC, тому:
-    # 9:00 Київ = 7:00 UTC
-    # 22:00 Київ = 20:00 UTC
-    schedule.every().day.at("07:00").do(job)  # 9:00 за Києвом
-    schedule.every().day.at("20:00").do(job)  # 22:00 за Києвом
+    # Render в UTC: 9:00 Київ = 07:00 UTC, 22:00 Київ = 20:00 UTC
+    schedule.every().day.at("07:00").do(job)
+    schedule.every().day.at("20:00").do(job)
     
-    from datetime import datetime
-    import pytz
-    
-    kyiv_tz = pytz.timezone('Europe/Kiev')
-    utc_now = datetime.now(pytz.UTC)
-    kyiv_now = utc_now.astimezone(kyiv_tz)
-    
-    logger.info("✅ Розклад налаштовано:")
-    logger.info(f"   🌅 Перевірка о 07:00 UTC (9:00 Київ)")
-    logger.info(f"   🌙 Перевірка о 20:00 UTC (22:00 Київ)")
-    logger.info(f"   ⏰ Зараз UTC: {utc_now.strftime('%H:%M:%S')}")
-    logger.info(f"   ⏰ Зараз Київ: {kyiv_now.strftime('%H:%M:%S')}")
+    logger.info("✅ Розклад:")
+    logger.info(f"   🌅 07:00 UTC = 9:00 Київ")
+    logger.info(f"   🌙 20:00 UTC = 22:00 Київ")
+    logger.info(f"   ⏰ Зараз (UTC): {datetime.now().strftime('%H:%M:%S')}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -482,16 +517,14 @@ def main():
         if r.status_code == 200:
             logger.info(f"✅ Бот: @{r.json()['result']['username']}")
         else:
-            logger.error(f"❌ Токен помилка: {r.text}")
+            logger.error(f"❌ Токен помилка")
             return
     except Exception as e:
-        logger.error(f"❌ Токен не перевірено: {e}")
+        logger.error(f"❌ Токен: {e}")
         return
     
     if ADMIN_CHAT_ID:
         logger.info(f"📧 Адмін: {ADMIN_CHAT_ID}")
-    else:
-        logger.warning("⚠️ ADMIN_CHAT_ID не встановлено")
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
