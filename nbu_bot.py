@@ -171,10 +171,50 @@ class NBUCoinMonitor:
             return None
     
     def find_new_coins(self, current_coins):
+        """Знайти нові монети та категоризувати всі"""
         if not self.previous_coins:
-            return []
+            # Перший запуск - всі монети нові
+            return {
+                'new': current_coins,
+                'available': [],
+                'expected': []
+            }
+        
         previous_titles = {coin['title'] for coin in self.previous_coins}
-        return [coin for coin in current_coins if coin['title'] not in previous_titles]
+        previous_dict = {coin['title']: coin for coin in self.previous_coins}
+        
+        new_coins = []
+        available = []
+        expected = []
+        
+        for coin in current_coins:
+            title = coin['title']
+            
+            # Нова монета (не була в попередньому списку)
+            if title not in previous_titles:
+                new_coins.append(coin)
+            # Монета з'явилась у продажу (була очікувалась, тепер у продажу)
+            elif title in previous_dict:
+                prev_coin = previous_dict[title]
+                if prev_coin.get('status') == 'Очікується' and coin.get('status') == 'У продажу':
+                    new_coins.append(coin)
+                # Інші монети розподіляємо по категоріям
+                elif coin.get('status') == 'У продажу':
+                    available.append(coin)
+                else:
+                    expected.append(coin)
+            else:
+                # Розподіляємо по категоріям якщо не нова
+                if coin.get('status') == 'У продажу':
+                    available.append(coin)
+                else:
+                    expected.append(coin)
+        
+        return {
+            'new': new_coins,
+            'available': available,
+            'expected': expected
+        }
     
     def format_coin_message(self, coin):
         if coin['status'] == "У продажу":
@@ -205,7 +245,9 @@ monitor = NBUCoinMonitor()
 def get_keyboard():
     keyboard = [
         [KeyboardButton("🔍 Перевірити зараз"), KeyboardButton("📋 Список монет")],
-        [KeyboardButton("📊 Статус бота"), KeyboardButton("🛑 Відписатися")]
+        [KeyboardButton("📊 Статус бота"), KeyboardButton("🧪 Тест сповіщення")],
+        [KeyboardButton("🗓️ Тест розкладу"), KeyboardButton("📄 Логи")],
+        [KeyboardButton("🛑 Відписатися")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -375,6 +417,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await list_coins(update, context)
     elif text == "📊 Статус бота":
         await status(update, context)
+    elif text == "🧪 Тест сповіщення":
+        await test_notification(update, context)
+    elif text == "🗓️ Тест розкладу":
+        await test_schedule(update, context)
+    elif text == "📄 Логи":
+        await get_logs(update, context)
     elif text == "🛑 Відписатися":
         await stop(update, context)
 
@@ -403,32 +451,77 @@ async def scheduled_check(app):
         logger.info(f"📦 Отримано {len(coins)} монет")
         logger.info(f"💾 Попередньо {len(monitor.previous_coins)} монет")
         
-        new_coins = monitor.find_new_coins(coins)
+        result = monitor.find_new_coins(coins)
+        new_coins = result['new']
+        available = result['available']
+        expected = result['expected']
+        
         logger.info(f"🆕 Нових: {len(new_coins)}")
+        logger.info(f"🟢 В наявності: {len(available)}")
+        logger.info(f"⏳ Очікується: {len(expected)}")
         
         if new_coins:
             logger.info(f"📢 Нові: {[c['title'] for c in new_coins]}")
         
-        if new_coins and monitor.subscribers:
-            logger.info(f"🎉 Надсилаю {len(new_coins)} монет до {len(monitor.subscribers)}...")
+        if monitor.subscribers:
+            logger.info(f"📧 Надсилаю звіт до {len(monitor.subscribers)} підписників...")
             
             success = 0
             for chat_id in monitor.subscribers:
                 try:
+                    # Формуємо повний звіт
+                    report = f"📊 *ЩОДЕННА ПЕРЕВІРКА НБУ*\n\n"
+                    report += f"🗓️ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+                    report += f"📦 Всього: {len(coins)} позицій\n\n"
+                    
+                    # НОВІ
+                    if new_coins:
+                        report += f"🎉 *НОВІ ({len(new_coins)}):*\n"
+                        for i, coin in enumerate(new_coins[:10], 1):
+                            report += f"{i}. {coin['title']} - {coin['price']}\n"
+                        if len(new_coins) > 10:
+                            report += f"... та ще {len(new_coins) - 10}\n"
+                        report += "\n"
+                    
+                    # В НАЯВНОСТІ
+                    if available:
+                        report += f"🟢 *В НАЯВНОСТІ ({len(available)}):*\n"
+                        for i, coin in enumerate(available[:10], 1):
+                            report += f"{i}. {coin['title']} - {coin['price']}\n"
+                        if len(available) > 10:
+                            report += f"... та ще {len(available) - 10}\n"
+                        report += "\n"
+                    
+                    # ОЧІКУЄТЬСЯ
+                    if expected:
+                        report += f"⏳ *ОЧІКУЄТЬСЯ ({len(expected)}):*\n"
+                        for i, coin in enumerate(expected[:10], 1):
+                            date_info = f" ({coin['expected_date']})" if coin.get('expected_date') else ""
+                            report += f"{i}. {coin['title']}{date_info}\n"
+                        if len(expected) > 10:
+                            report += f"... та ще {len(expected) - 10}\n"
+                    
                     await app.bot.send_message(
                         chat_id=chat_id,
-                        text=f"🎉 *НОВІ МОНЕТИ НБУ!*\n\n{len(new_coins)} нових:",
+                        text=report,
                         parse_mode='Markdown'
                     )
                     
-                    for coin in new_coins:
+                    # Якщо є нові - показуємо деталі
+                    if new_coins:
                         await app.bot.send_message(
                             chat_id=chat_id,
-                            text=monitor.format_coin_message(coin),
-                            parse_mode='Markdown',
-                            disable_web_page_preview=True
+                            text=f"🔍 *ДЕТАЛІ НОВИХ МОНЕТ:*",
+                            parse_mode='Markdown'
                         )
-                        time.sleep(0.5)
+                        for coin in new_coins[:5]:
+                            await app.bot.send_message(
+                                chat_id=chat_id,
+                                text=monitor.format_coin_message(coin),
+                                parse_mode='Markdown',
+                                disable_web_page_preview=True
+                            )
+                            time.sleep(0.5)
                     
                     success += 1
                     logger.info(f"✅ Надіслано {chat_id}")
@@ -436,9 +529,7 @@ async def scheduled_check(app):
                     logger.error(f"❌ Помилка {chat_id}: {e}")
             
             logger.info(f"📊 Успішно: {success}/{len(monitor.subscribers)}")
-            await notify_admin(app, f"✅ Надіслано {len(new_coins)} монет до {success} користувачів")
-        else:
-            logger.info(f"ℹ️ Нових немає")
+            await notify_admin(app, f"✅ Звіт надіслано до {success} користувачів")
         
         monitor.previous_coins = coins
         monitor.save_coins(coins)
@@ -530,12 +621,7 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("check", check_now))
-    app.add_handler(CommandHandler("list", list_coins))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("test_schedule", test_schedule))
-    app.add_handler(CommandHandler("test_notification", test_notification))
-    app.add_handler(CommandHandler("logs", get_logs))
+    # Видалили команди - тільки кнопки
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     schedule_checker(app)
