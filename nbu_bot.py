@@ -421,9 +421,24 @@ def schedule_checker(app):
         except Exception as e:
             logger.error(f"Помилка розкладу: {e}")
     
-    schedule.every().day.at("09:00").do(job)
-    schedule.every().day.at("22:00").do(job)
-    logger.info("✅ Розклад: 9:00 та 22:00")
+    # ВАЖЛИВО: Render працює в UTC, тому:
+    # 9:00 Київ = 7:00 UTC
+    # 22:00 Київ = 20:00 UTC
+    schedule.every().day.at("07:00").do(job)  # 9:00 за Києвом
+    schedule.every().day.at("20:00").do(job)  # 22:00 за Києвом
+    
+    from datetime import datetime
+    import pytz
+    
+    kyiv_tz = pytz.timezone('Europe/Kiev')
+    utc_now = datetime.now(pytz.UTC)
+    kyiv_now = utc_now.astimezone(kyiv_tz)
+    
+    logger.info("✅ Розклад налаштовано:")
+    logger.info(f"   🌅 Перевірка о 07:00 UTC (9:00 Київ)")
+    logger.info(f"   🌙 Перевірка о 20:00 UTC (22:00 Київ)")
+    logger.info(f"   ⏰ Зараз UTC: {utc_now.strftime('%H:%M:%S')}")
+    logger.info(f"   ⏰ Зараз Київ: {kyiv_now.strftime('%H:%M:%S')}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -486,6 +501,7 @@ def main():
     app.add_handler(CommandHandler("list", list_coins))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("test_schedule", test_schedule))
+    app.add_handler(CommandHandler("test_notification", test_notification))
     app.add_handler(CommandHandler("logs", get_logs))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
