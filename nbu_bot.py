@@ -12,7 +12,7 @@ from datetime import datetime
 import pytz
 from aiohttp import web
 
-# --- НАЛАШТУВАННЯ ---
+# --- CONFIG ---
 API_TOKEN = os.getenv('TELEGRAM_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = int(os.getenv('ADMIN_CHAT_ID', 0))
@@ -23,7 +23,7 @@ dp = Dispatcher()
 kyiv_tz = pytz.timezone('Europe/Kyiv')
 scheduler = AsyncIOScheduler(timezone=kyiv_tz)
 
-# --- БАЗА ДАНИХ ---
+# --- DATABASE ---
 def init_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
@@ -40,71 +40,81 @@ def add_user(user_id):
     conn.commit()
     cur.close(); conn.close()
 
-# --- ПАРСИНГ З ПОКРАЩЕНИМ ВИЯВЛЕННЯМ ---
+# --- ADVANCED SCRAPER ---
 def get_coins_data():
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7'
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://coins.bank.gov.ua/'
     }
     try:
-        response = requests.get(URL, headers=headers, timeout=25)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Спроба 1: Основний каталог
+        session = requests.Session()
+        response = session.get(URL, headers=headers, timeout=30)
         
-        # Шукаємо всі посилання, що містять паттерн товару /p-
+        # Якщо НБУ видає 403 або пусту сторінку, пробуємо "прогріти" куки через головну
+        if response.status_code != 200 or len(response.text) < 5000:
+            session.get("https://coins.bank.gov.ua/", headers=headers)
+            response = session.get(URL, headers=headers, timeout=30)
+
+        soup = BeautifulSoup(response.text, 'html.parser')
         all_links = soup.find_all('a', href=re.compile(r'/p-'))
         
-        coins_map = {}
-        newly_updated, available, waiting = [], [], []
-        seen_hrefs = set()
+        coins_map, newly, available, waiting = {}, [], [], []
+        seen = set()
 
         for link in all_links:
             href = link.get('href')
-            if not href or href in seen_hrefs: continue
-            seen_hrefs.add(href)
+            if not href or href in seen: continue
+            seen.add(href)
             
             title = (link.get('title') or link.get_text(strip=True)).strip()
-            if len(title) < 4: continue # Пропускаємо занадто короткі назви
+            if len(title) < 4: continue
             
-            # Шукаємо контейнер з ціною (може бути div, td, li або span)
-            parent = link.find_parent(['div', 'td', 'li', 'span', 'tr'])
-            p_text = parent.get_text(separator=' ').lower() if parent else ""
-            p_text = p_text.replace('\xa0', ' ') # Чистимо спецпробіли
+            # Шукаємо контейнер з даними
+            parent = link.find_parent(['div', 'td', 'li', 'span'])
+            p_text = parent.get_text(separator=' ', strip=True).lower() if parent else ""
+            p_text = p_text.replace('\xa0', ' ')
             
-            # Шукаємо ціну: цифри + грн
+            # Витягуємо ціну
             price_match = re.search(r'(\d[\d\s]*грн)', p_text)
             price = price_match.group(1).strip() if price_match else "Очікується"
             
-            # Статус: якщо є ціна і немає слова "очікується" АБО є слово "наявності"
-            is_in_stock = "наявності" in p_text or ("грн" in price and "очікується" not in p_text)
+            # Визначаємо статус
+            is_in_stock = "наявності" in p_text and "немає" not in p_text
+            # Якщо є ціна, але немає напису "очікується" — це теж продаж
+            if not is_in_stock and "грн" in price and "очікується" not in p_text:
+                is_in_stock = True
+
             status = "AVAILABLE" if is_in_stock else "WAITING"
-            
             coins_map[title] = {"status": status, "price": price}
+            
             full_link = f"https://coins.bank.gov.ua{href}" if not href.startswith('http') else href
             entry = f"🔹 **[{title}]({full_link})**\n💰 {price}"
 
-            # Сортування:
-            if ("грн" in price and not is_in_stock) or ("продажу з" in p_text):
-                newly_updated.append(entry)
+            # Сортування: Новинки (є ціна/дата, але не в продажу) > Продаж > Очікується
+            if "грн" in price and not is_in_stock:
+                newly.append(entry)
             elif is_in_stock:
                 available.append(entry)
             else:
                 waiting.append(entry)
                 
-        return coins_map, newly_updated, available, waiting
+        return coins_map, newly, available, waiting
     except Exception as e:
-        print(f"Scraper Error: {e}")
+        print(f"Crit error: {e}")
         return None, [], [], []
 
-# --- СПОВІЩЕННЯ ---
+# --- NOTIFICATIONS ---
 async def notify_all(text):
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users"); users = [row[0] for row in cur.fetchall()]
     cur.close(); conn.close()
-    for user_id in users:
+    for uid in users:
         try:
-            await bot.send_message(user_id, text, parse_mode="Markdown", disable_web_page_preview=True)
-            await asyncio.sleep(0.05)
+            await bot.send_message(uid, text, parse_mode="Markdown", disable_web_page_preview=True)
+            await asyncio.sleep(0.1)
         except: pass
 
 async def monitor_changes():
@@ -116,26 +126,25 @@ async def monitor_changes():
     
     for title, data in current_map.items():
         cur.execute("SELECT last_status, last_price FROM last_state WHERE coin_title = %s", (title,))
-        result = cur.fetchone()
+        res = cur.fetchone()
         
-        if result:
-            old_status, old_price = result
+        if res:
+            old_status, old_price = res
             if old_status == "WAITING" and data['status'] == "AVAILABLE":
-                await notify_all(f"🔥 **З'ЯВИЛОСЬ У ПРОДАЖУ!**\n\n🔹 {title}\n💰 {data['price']}\n\nПоспішайте! 🚀")
+                await notify_all(f"🔥 **З'ЯВИЛОСЬ У ПРОДАЖУ!**\n\n{title}\n💰 {data['price']}\n🚀 Купуйте швидше!")
             elif "очікується" in old_price.lower() and "грн" in data['price'].lower():
-                await notify_all(f"🆕 **ВСТАНОВЛЕНО ЦІНУ!**\n\n🔹 {title}\n💰 Ціна: {data['price']}\n\nСкоро буде! 👀")
+                await notify_all(f"🆕 **ВСТАНОВЛЕНО ЦІНУ!**\n\n{title}\n💰 {data['price']}\n👀 Скоро запуск!")
             
-            cur.execute("UPDATE last_state SET last_status = %s, last_price = %s WHERE coin_title = %s", 
+            cur.execute("UPDATE last_state SET last_status=%s, last_price=%s WHERE coin_title=%s", 
                         (data['status'], data['price'], title))
         else:
-            cur.execute("INSERT INTO last_state (coin_title, last_status, last_price) VALUES (%s, %s, %s)", 
-                        (title, data['status'], data['price']))
-            await notify_all(f"✨ **НОВА МОНЕТА В КАТАЛОЗІ!**\n\n🔹 {title}\n💰 Стан: {data['price']}")
+            cur.execute("INSERT INTO last_state VALUES (%s, %s, %s)", (title, data['status'], data['price']))
+            await notify_all(f"✨ **НОВА МОНЕТА:** {title}\n💰 Статус: {data['price']}")
 
     conn.commit()
     cur.close(); conn.close()
 
-# --- МЕНЮ ТА КОМАНДИ ---
+# --- HANDLERS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     add_user(message.chat.id)
@@ -145,26 +154,24 @@ async def cmd_start(message: types.Message):
         kb.button(text="📊 Статистика")
         kb.button(text="🧪 Тест розсилки")
     kb.adjust(1, 2)
-    await message.answer("✅ Моніторинг НБУ активований! Я напишу сюди, як тільки статус монет зміниться.", 
-                         reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer("🦾 Моніторинг НБУ 2.0 запущено!", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "🔍 Перевірити каталог")
 async def manual_check(message: types.Message):
-    data_map, newly, av, wt = get_coins_data()
-    if data_map is None:
-        await message.answer("❌ Тимчасово не вдалося підключитися до НБУ.")
+    data, newly, av, wt = get_coins_data()
+    if data is None:
+        await message.answer("❌ НБУ заблокував запит. Спробуйте пізніше.")
         return
 
-    res = []
-    if newly: res.append("🆕 **ОНОВЛЕННЯ / ЦІНИ:**\n" + "\n\n".join(newly))
-    if av: res.append("🟢 **В НАЯВНОСТІ:**\n" + "\n\n".join(av[:15]))
-    if wt: res.append("⏳ **ОЧІКУЮТЬСЯ:**\n" + "\n\n".join(wt[:10]))
+    msg_parts = []
+    if newly: msg_parts.append("🆕 **ОНОВЛЕННЯ / ЦІНИ:**\n" + "\n\n".join(newly))
+    if av: msg_parts.append("🟢 **В НАЯВНОСТІ:**\n" + "\n\n".join(av[:15]))
+    if wt: msg_parts.append("⏳ **ОЧІКУЮТЬСЯ:**\n" + "\n\n".join(wt[:10]))
     
-    if not res:
-        await message.answer("🔍 Товарів не знайдено. Спробуйте через 5-10 хв, сайт НБУ може бути перевантажений.")
+    if not msg_parts:
+        await message.answer("🔍 Порожньо. Можливо, техроботи на сайті НБУ.")
     else:
-        text = "\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n".join(res)
-        await message.answer(text[:4096], parse_mode="Markdown", disable_web_page_preview=True)
+        await message.answer("\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n".join(msg_parts), parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
@@ -174,23 +181,21 @@ async def show_stats(message: types.Message):
     cur.execute("SELECT count(*) FROM users"); u_count = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM last_state"); c_count = cur.fetchone()[0]
     cur.close(); conn.close()
-    await message.answer(f"📊 **АДМІН-ІНФО:**\n\n👤 Користувачів: {u_count}\n📦 Монет у базі: {c_count}\n🕒 {datetime.now(kyiv_tz).strftime('%H:%M:%S')}")
+    await message.answer(f"📊 **АДМІН-КАНАЛ:**\n👤 Підписників: {u_count}\n📦 Монет у базі: {c_count}")
 
 @dp.message(F.text == "🧪 Тест розсилки")
 async def test_send(message: types.Message):
     if message.chat.id == ADMIN_ID:
-        await message.answer("🚀 Тест розсилки...")
-        await notify_all("🧪 Тест сповіщень: Система працює!")
+        await notify_all("🧪 Тест системи сповіщень успішний!")
 
-# --- ЗАПУСК ---
-async def handle(request): return web.Response(text="Bot is running")
+# --- RUNNER ---
+async def handle(request): return web.Response(text="Running")
 
 async def main():
     init_db()
     app = web.Application(); app.router.add_get('/', handle)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
-
     scheduler.add_job(monitor_changes, 'interval', minutes=3)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True)
