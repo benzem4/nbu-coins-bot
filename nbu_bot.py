@@ -31,24 +31,27 @@ def init_db():
     cur.execute('''CREATE TABLE IF NOT EXISTS last_state 
                    (coin_title TEXT PRIMARY KEY, last_status TEXT, last_price TEXT)''')
     conn.commit()
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
 
 def add_user(user_id):
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute('INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING', (user_id,))
     conn.commit()
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
 
-# --- ПАРСИНГ ТА РОЗУМНЕ СОРТУВАННЯ ---
+# --- ПАРСИНГ З ПОКРАЩЕНИМ ВИЯВЛЕННЯМ ---
 def get_coins_data():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
     try:
         response = requests.get(URL, headers=headers, timeout=25)
         soup = BeautifulSoup(response.text, 'html.parser')
-        all_links = soup.find_all('a', href=lambda x: x and '/p-' in x)
+        
+        # Шукаємо всі посилання, що містять паттерн товару /p-
+        all_links = soup.find_all('a', href=re.compile(r'/p-'))
         
         coins_map = {}
         newly_updated, available, waiting = [], [], []
@@ -60,32 +63,30 @@ def get_coins_data():
             seen_hrefs.add(href)
             
             title = (link.get('title') or link.get_text(strip=True)).strip()
-            if len(title) < 5: continue
+            if len(title) < 4: continue # Пропускаємо занадто короткі назви
             
-            parent = link.find_parent(['div', 'li', 'td'])
+            # Шукаємо контейнер з ціною (може бути div, td, li або span)
+            parent = link.find_parent(['div', 'td', 'li', 'span', 'tr'])
             p_text = parent.get_text(separator=' ').lower() if parent else ""
+            p_text = p_text.replace('\xa0', ' ') # Чистимо спецпробіли
             
-            # Шукаємо ціну
+            # Шукаємо ціну: цифри + грн
             price_match = re.search(r'(\d[\d\s]*грн)', p_text)
-            price = price_match.group(1).replace('\xa0', ' ') if price_match else "Очікується"
+            price = price_match.group(1).strip() if price_match else "Очікується"
             
-            # Визначаємо статус
+            # Статус: якщо є ціна і немає слова "очікується" АБО є слово "наявності"
             is_in_stock = "наявності" in p_text or ("грн" in price and "очікується" not in p_text)
             status = "AVAILABLE" if is_in_stock else "WAITING"
             
             coins_map[title] = {"status": status, "price": price}
-            
-            full_link = f"https://coins.bank.gov.ua{href}"
+            full_link = f"https://coins.bank.gov.ua{href}" if not href.startswith('http') else href
             entry = f"🔹 **[{title}]({full_link})**\n💰 {price}"
 
-            # ЛОГІКА КАТЕГОРІЙ:
-            # 1. Якщо є ціна, але ще не в наявності (АБО є слова "дата", "продаж") -> НОВИНКИ
+            # Сортування:
             if ("грн" in price and not is_in_stock) or ("продажу з" in p_text):
                 newly_updated.append(entry)
-            # 2. Якщо реально в наявності
             elif is_in_stock:
                 available.append(entry)
-            # 3. Все інше
             else:
                 waiting.append(entry)
                 
@@ -98,10 +99,8 @@ def get_coins_data():
 async def notify_all(text):
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    users = [row[0] for row in cur.fetchall()]
+    cur.execute("SELECT user_id FROM users"); users = [row[0] for row in cur.fetchall()]
     cur.close(); conn.close()
-    
     for user_id in users:
         try:
             await bot.send_message(user_id, text, parse_mode="Markdown", disable_web_page_preview=True)
@@ -121,25 +120,22 @@ async def monitor_changes():
         
         if result:
             old_status, old_price = result
-            # Подія: З'явилася в наявності
             if old_status == "WAITING" and data['status'] == "AVAILABLE":
-                await notify_all(f"🔥 **З'ЯВИЛОСЬ У ПРОДАЖУ!**\n\n🔹 {title}\n💰 Ціна: {data['price']}\n\nПоспішайте купити! 🚀")
-            # Подія: З'явилася ціна або дата (але ще не продаж)
+                await notify_all(f"🔥 **З'ЯВИЛОСЬ У ПРОДАЖУ!**\n\n🔹 {title}\n💰 {data['price']}\n\nПоспішайте! 🚀")
             elif "очікується" in old_price.lower() and "грн" in data['price'].lower():
-                await notify_all(f"🆕 **ОНОВЛЕНО ІНФОРМАЦІЮ!**\n\n🔹 {title}\n💰 Встановлено ціну: {data['price']}\n\nСкоро буде доступно! 👀")
+                await notify_all(f"🆕 **ВСТАНОВЛЕНО ЦІНУ!**\n\n🔹 {title}\n💰 Ціна: {data['price']}\n\nСкоро буде! 👀")
             
             cur.execute("UPDATE last_state SET last_status = %s, last_price = %s WHERE coin_title = %s", 
                         (data['status'], data['price'], title))
         else:
             cur.execute("INSERT INTO last_state (coin_title, last_status, last_price) VALUES (%s, %s, %s)", 
                         (title, data['status'], data['price']))
-            # Повідомляємо про нову позицію в каталозі взагалі
-            await notify_all(f"✨ **НОВА МОНЕТА В КАТАЛОЗІ!**\n\n🔹 {title}\n💰 Статус: {data['price']}")
+            await notify_all(f"✨ **НОВА МОНЕТА В КАТАЛОЗІ!**\n\n🔹 {title}\n💰 Стан: {data['price']}")
 
     conn.commit()
     cur.close(); conn.close()
 
-# --- МЕНЮ ТА ОБРОБНИКИ ---
+# --- МЕНЮ ТА КОМАНДИ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     add_user(message.chat.id)
@@ -149,30 +145,26 @@ async def cmd_start(message: types.Message):
         kb.button(text="📊 Статистика")
         kb.button(text="🧪 Тест розсилки")
     kb.adjust(1, 2)
-    await message.answer("✅ Моніторинг НБУ активований!", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer("✅ Моніторинг НБУ активований! Я напишу сюди, як тільки статус монет зміниться.", 
+                         reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "🔍 Перевірити каталог")
 async def manual_check(message: types.Message):
     data_map, newly, av, wt = get_coins_data()
-    
     if data_map is None:
-        await message.answer("❌ Помилка зв'язку з сайтом НБУ.")
+        await message.answer("❌ Тимчасово не вдалося підключитися до НБУ.")
         return
 
-    sections = []
-    if newly:
-        sections.append("🔥 **НОВИНКИ ТА ОНОВЛЕННЯ:**\n" + "\n\n".join(newly))
-    if av:
-        sections.append("🟢 **В НАЯВНОСТІ:**\n" + "\n\n".join(av[:15]))
-    if wt:
-        sections.append("⏳ **ОЧІКУЮТЬСЯ:**\n" + "\n\n".join(wt[:10]))
+    res = []
+    if newly: res.append("🆕 **ОНОВЛЕННЯ / ЦІНИ:**\n" + "\n\n".join(newly))
+    if av: res.append("🟢 **В НАЯВНОСТІ:**\n" + "\n\n".join(av[:15]))
+    if wt: res.append("⏳ **ОЧІКУЮТЬСЯ:**\n" + "\n\n".join(wt[:10]))
     
-    if not sections:
-        await message.answer("🔍 На сторінці нічого не знайдено. Можливо, сайт тимчасово змінив структуру.")
+    if not res:
+        await message.answer("🔍 Товарів не знайдено. Спробуйте через 5-10 хв, сайт НБУ може бути перевантажений.")
     else:
-        # Telegram має ліміт повідомлення, тому розбиваємо якщо дуже довге
-        full_text = "\n\n" + "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n".join(sections)
-        await message.answer(full_text[:4096], parse_mode="Markdown", disable_web_page_preview=True)
+        text = "\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n".join(res)
+        await message.answer(text[:4096], parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
@@ -182,14 +174,13 @@ async def show_stats(message: types.Message):
     cur.execute("SELECT count(*) FROM users"); u_count = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM last_state"); c_count = cur.fetchone()[0]
     cur.close(); conn.close()
-    
-    await message.answer(f"📊 **АДМІН-СТАТИСТИКА:**\n\n👤 Користувачів: {u_count}\n📦 Монет у базі: {c_count}\n🕒 {datetime.now(kyiv_tz).strftime('%H:%M:%S')}")
+    await message.answer(f"📊 **АДМІН-ІНФО:**\n\n👤 Користувачів: {u_count}\n📦 Монет у базі: {c_count}\n🕒 {datetime.now(kyiv_tz).strftime('%H:%M:%S')}")
 
 @dp.message(F.text == "🧪 Тест розсилки")
 async def test_send(message: types.Message):
     if message.chat.id == ADMIN_ID:
-        await message.answer("🚀 Запуск тесту...")
-        await notify_all("🧪 Тестове повідомлення: система сповіщень працює коректно!")
+        await message.answer("🚀 Тест розсилки...")
+        await notify_all("🧪 Тест сповіщень: Система працює!")
 
 # --- ЗАПУСК ---
 async def handle(request): return web.Response(text="Bot is running")
@@ -202,7 +193,6 @@ async def main():
 
     scheduler.add_job(monitor_changes, 'interval', minutes=3)
     scheduler.start()
-
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
