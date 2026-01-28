@@ -1,8 +1,7 @@
 aiogram
-requests
-beautifulsoup4
 apscheduler
-pytz
-aiohttp
 psycopg2-binary
-requests[socks]>=2.26.0
+beautifulsoup4
+cloudscraper
+aiohttp
+PySocks
