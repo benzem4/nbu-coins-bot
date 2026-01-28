@@ -4,3 +4,4 @@ beautifulsoup4
 apscheduler
 pytz
 aiohttp
+psycopg2-binary
