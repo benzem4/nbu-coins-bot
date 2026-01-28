@@ -46,22 +46,29 @@ def add_user(user_id):
 
 # --- SCRAPER ---
 def get_coins_data():
-    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+    # Налаштовуємо проксі так, щоб підтримувались і http, і socks5
+    # Якщо в PROXY_URL на Render ти впишеш socks5://..., бібліотека сама зрозуміє, що робити
+    proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL
+    } if PROXY_URL else None
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8',
     }
 
     try:
-        time.sleep(random.uniform(1, 3))
+        # Важливо: використовуємо session, щоб куки зберігалися між запитами
         session = requests.Session()
-        # Прогрів сесії
-        session.get("https://coins.bank.gov.ua/", headers=headers, proxies=proxies, timeout=15)
-        # Запит каталогу
+        
+        # Виконуємо запит. 
+        # Якщо Render видає помилку "Missing dependencies for SOCKS support", 
+        # то в файл requirements.txt треба додати: requests[socks]
         response = session.get(URL, headers=headers, proxies=proxies, timeout=30)
         
-        if response.status_code != 200: return None, [], [], []
+        if response.status_code != 200:
+            print(f"DEBUG: Сайт повернув код {response.status_code}")
+            return None, [], [], []
 
         soup = BeautifulSoup(response.text, 'html.parser')
         all_links = soup.find_all('a', href=re.compile(r'/p-'))
