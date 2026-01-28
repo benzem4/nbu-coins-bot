@@ -12,6 +12,7 @@ from datetime import datetime
 import pytz
 from aiohttp import web
 
+
 # --- НАЛАШТУВАННЯ ---
 API_TOKEN = os.getenv('TELEGRAM_TOKEN')
 URL = "https://coins.bank.gov.ua/catalog.html"
