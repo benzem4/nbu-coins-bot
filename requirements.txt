@@ -5,3 +5,4 @@ apscheduler
 pytz
 aiohttp
 psycopg2-binary
+requests[socks]>=2.26.0
