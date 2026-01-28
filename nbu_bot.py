@@ -15,6 +15,7 @@ from aiohttp import web
 # --- CONFIG ---
 API_TOKEN = os.getenv('TELEGRAM_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
+PROXY_URL = os.getenv('PROXY_URL')
 ADMIN_ID = int(os.getenv('ADMIN_CHAT_ID', 0))
 URL = "https://coins.bank.gov.ua/catalog.html"
 
@@ -22,41 +23,46 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone='Europe/Kyiv')
 
-# --- ФУНКЦІЯ ОТРИМАННЯ БЕЗКОШТОВНОГО ПРОКСІ ---
-def get_free_proxy():
+# --- DATABASE ---
+def init_db():
     try:
-        # Запит до API безкоштовних проксі (тільки HTTP, щоб було простіше)
-        # Параметри: тип http, країни UA, PL, DE (ближче до нас)
-        api_url = "https://pubproxy.com/api/proxy?type=http&limit=1&country=UA,PL,DE"
-        resp = requests.get(api_url, timeout=5).json()
-        if resp.get('data'):
-            proxy = resp['data'][0]['ipPort']
-            print(f"DEBUG: Використовую проксі {proxy}")
-            return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-    except Exception as e:
-        print(f"DEBUG: Не вдалося знайти проксі: {e}")
-    return None
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute('CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY)')
+        cur.execute('''CREATE TABLE IF NOT EXISTS last_state 
+                       (coin_title TEXT PRIMARY KEY, last_status TEXT, last_price TEXT)''')
+        conn.commit()
+        cur.close(); conn.close()
+    except Exception as e: print(f"DB Error: {e}")
 
-# --- ПАРСИНГ З ПРОКСІ ТА ЗАТРИМКОЮ ---
-def get_coins_data():
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-    }
-    
-    # Спробуємо отримати проксі
-    proxies = get_free_proxy()
-    
+def add_user(user_id):
     try:
-        # Невелика випадкова пауза перед запитом
-        time.sleep(random.randint(3, 7))
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute('INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING', (user_id,))
+        conn.commit()
+        cur.close(); conn.close()
+    except: pass
+
+# --- SCRAPER ---
+def get_coins_data():
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8',
+    }
+
+    try:
+        time.sleep(random.uniform(1, 3))
+        session = requests.Session()
+        # Прогрів сесії
+        session.get("https://coins.bank.gov.ua/", headers=headers, proxies=proxies, timeout=15)
+        # Запит каталогу
+        response = session.get(URL, headers=headers, proxies=proxies, timeout=30)
         
-        # Спроба запиту
-        response = requests.get(URL, headers=headers, proxies=proxies, timeout=25)
-        
-        if response.status_code != 200:
-            print(f"DEBUG: Сайт відповів кодом {response.status_code}")
-            return None, [], [], []
-        
+        if response.status_code != 200: return None, [], [], []
+
         soup = BeautifulSoup(response.text, 'html.parser')
         all_links = soup.find_all('a', href=re.compile(r'/p-'))
         
@@ -90,30 +96,66 @@ def get_coins_data():
                 
         return coins_map, newly, available, waiting
     except Exception as e:
-        print(f"DEBUG: Помилка при запиті: {e}")
+        print(f"Scraper error: {e}")
         return None, [], [], []
 
-# --- РЕШТА ФУНКЦІОНАЛУ (БЕЗ ЗМІН) ---
+# --- NOTIFICATIONS & MONITORING ---
+async def notify_all(text):
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users"); users = [row[0] for row in cur.fetchall()]
+        cur.close(); conn.close()
+        for uid in users:
+            try:
+                await bot.send_message(uid, text, parse_mode="Markdown", disable_web_page_preview=True)
+                await asyncio.sleep(0.05)
+            except: pass
+    except: pass
+
+async def monitor_changes():
+    current_map, _, _, _ = get_coins_data()
+    if not current_map: return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        for title, data in current_map.items():
+            cur.execute("SELECT last_status, last_price FROM last_state WHERE coin_title = %s", (title,))
+            res = cur.fetchone()
+            if res:
+                if res[0] == "WAITING" and data['status'] == "AVAILABLE":
+                    await notify_all(f"🔥 **З'ЯВИЛОСЬ У ПРОДАЖУ!**\n\n🔹 {title}\n💰 {data['price']}")
+                elif "очікується" in res[1].lower() and "грн" in data['price'].lower():
+                    await notify_all(f"🆕 **ВСТАНОВЛЕНО ЦІНУ!**\n\n🔹 {title}\n💰 {data['price']}")
+                cur.execute("UPDATE last_state SET last_status=%s, last_price=%s WHERE coin_title=%s", (data['status'], data['price'], title))
+            else:
+                cur.execute("INSERT INTO last_state VALUES (%s, %s, %s)", (title, data['status'], data['price']))
+        conn.commit(); cur.close(); conn.close()
+    except: pass
+
+# --- HANDLERS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    add_user(message.chat.id)
     kb = ReplyKeyboardBuilder()
     kb.button(text="🔍 Перевірити каталог")
     if message.chat.id == ADMIN_ID:
         kb.button(text="🌐 Всі позиції (Direct)")
         kb.button(text="📊 Статистика")
     kb.adjust(1, 2)
-    await message.answer("✅ Бот запущений з підтримкою Proxy. Спробуйте Direct запит.", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer("✅ Моніторинг НБУ 2.0 активовано через львівський проксі!", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "🌐 Всі позиції (Direct)")
 async def direct_list(message: types.Message):
     if message.chat.id != ADMIN_ID: return
-    await message.answer("📡 Шукаю вільний проксі та роблю запит...")
+    m = await message.answer("📡 Опитування сайту через проксі...")
     _, newly, av, wt = get_coins_data()
     all_items = newly + av + wt
     if not all_items:
-        await message.answer("❌ Навіть через проксі сайт не повернув позицій. Можливо, зараз ведуться техроботи або всі проксі в списку теж забанені.")
+        await m.edit_text("❌ Помилка. Сайт не віддав дані. Перевір PROXY_URL.")
     else:
-        text = "🌐 **СПИСОК (PROXY MODE):**\n\n" + "\n\n".join(all_items)
+        await m.delete()
+        text = "✅ **ДАНІ З САЙТУ:**\n\n" + "\n\n".join(all_items)
         for i in range(0, len(text), 4000):
             await message.answer(text[i:i+4000], parse_mode="Markdown", disable_web_page_preview=True)
 
@@ -121,20 +163,39 @@ async def direct_list(message: types.Message):
 async def manual_check(message: types.Message):
     data, newly, av, wt = get_coins_data()
     if data is None:
-        await message.answer("⚠️ Не вдалося зв'язатися з сайтом.")
+        await message.answer("⚠️ Немає зв'язку з НБУ.")
         return
     res = []
-    if newly: res.append("🆕 **ОНОВЛЕННЯ:**\n" + "\n\n".join(newly))
+    if newly: res.append("🆕 **ЦІНИ:**\n" + "\n\n".join(newly))
     if av: res.append("🟢 **В НАЯВНОСТІ:**\n" + "\n\n".join(av[:15]))
     if wt: res.append("⏳ **ОЧІКУЮТЬСЯ:**\n" + "\n\n".join(wt[:10]))
     await message.answer(("\n\n⎯⎯⎯⎯⎯\n\n".join(res) if res else "🔍 Порожньо"), parse_mode="Markdown", disable_web_page_preview=True)
 
-async def handle(request): return web.Response(text="Bot is running")
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: types.Message):
+    if message.chat.id != ADMIN_ID: return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM users"); u = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM last_state"); c = cur.fetchone()[0]
+        cur.close(); conn.close()
+        await message.answer(f"📊 Статистика:\n👤 Користувачів: {u}\n📦 Монет у базі: {c}")
+    except Exception as e: await message.answer(f"❌ Помилка БД: {e}")
+
+# --- SERVER ---
+async def handle(request): return web.Response(text="Bot Alive")
 
 async def main():
+    init_db()
     app = web.Application(); app.router.add_get('/', handle)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
+    
+    scheduler.add_job(monitor_changes, 'cron', hour=9, minute=0)
+    scheduler.add_job(monitor_changes, 'cron', hour=22, minute=0)
+    scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
